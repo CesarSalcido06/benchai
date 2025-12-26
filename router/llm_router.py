@@ -32,7 +32,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse, FileResponse
+from fastapi.responses import StreamingResponse, FileResponse, HTMLResponse
 from pydantic import BaseModel
 import httpx
 import aiosqlite
@@ -124,6 +124,61 @@ ALLOWED_SHELL_COMMANDS = [
     "eslint", "prettier", "jest", "vitest", "playwright", "cypress"
 ]
 
+# --- REQUEST CACHE ---
+# Cache identical requests to avoid redundant LLM calls (from deep research)
+class RequestCache:
+    """TTL-based cache for LLM responses to reduce duplicate work."""
+
+    def __init__(self, ttl_seconds: int = 300, max_size: int = 100):
+        self.cache: Dict[str, tuple] = {}  # key -> (response, timestamp)
+        self.ttl = ttl_seconds
+        self.max_size = max_size
+        self.hits = 0
+        self.misses = 0
+
+    def _make_key(self, model: str, messages: List[Dict], max_tokens: int) -> str:
+        """Create cache key from request parameters."""
+        content = json.dumps({"model": model, "messages": messages, "max_tokens": max_tokens}, sort_keys=True)
+        return hashlib.sha256(content.encode()).hexdigest()[:16]
+
+    def get(self, model: str, messages: List[Dict], max_tokens: int) -> Optional[Dict]:
+        """Get cached response if exists and not expired."""
+        key = self._make_key(model, messages, max_tokens)
+        if key in self.cache:
+            response, timestamp = self.cache[key]
+            if time.time() - timestamp < self.ttl:
+                self.hits += 1
+                print(f"[CACHE] HIT - returning cached response (hits={self.hits})")
+                return response
+            else:
+                del self.cache[key]  # Expired
+        self.misses += 1
+        return None
+
+    def set(self, model: str, messages: List[Dict], max_tokens: int, response: Dict):
+        """Cache a response."""
+        # Evict oldest if at capacity
+        if len(self.cache) >= self.max_size:
+            oldest_key = min(self.cache.keys(), key=lambda k: self.cache[k][1])
+            del self.cache[oldest_key]
+
+        key = self._make_key(model, messages, max_tokens)
+        self.cache[key] = (response, time.time())
+
+    def stats(self) -> Dict:
+        """Return cache statistics."""
+        return {
+            "size": len(self.cache),
+            "max_size": self.max_size,
+            "hits": self.hits,
+            "misses": self.misses,
+            "hit_rate": f"{self.hits / max(1, self.hits + self.misses) * 100:.1f}%",
+            "ttl_seconds": self.ttl
+        }
+
+# Global cache instance
+request_cache = RequestCache(ttl_seconds=300, max_size=100)
+
 # Model Definitions
 # --- MODULAR MODEL REGISTRY ---
 # Easy to add/swap models. Each model has:
@@ -147,10 +202,10 @@ MODELS = {
     },
     "planner": {
         "name": "Qwen2.5 7B (Planner)",
-        "file": "qwen2.5-7b-instruct.Q4_K_M.gguf",
+        "file": "qwen2.5-7b-instruct.Q5_K_M.gguf",  # Upgraded from Q4_K_M for better quality
         "port": 8092,
         "gpu_layers": 35,
-        "context": 8192,
+        "context": 4096,  # Reduced from 8192 for CPU stability
         "description": "Orchestrates multi-step tasks",
         "role": "orchestrator",
         "capabilities": ["planning", "reasoning", "tool_selection"],
@@ -159,10 +214,10 @@ MODELS = {
     },
     "research": {
         "name": "Qwen2.5 7B",
-        "file": "qwen2.5-7b-instruct.Q4_K_M.gguf",
+        "file": "qwen2.5-7b-instruct.Q5_K_M.gguf",  # Upgraded from Q4_K_M for better quality
         "port": 8092,
         "gpu_layers": 35,
-        "context": 8192,
+        "context": 4096,  # Reduced from 8192 for CPU stability
         "description": "Deep analysis and reasoning",
         "role": "researcher",
         "capabilities": ["reasoning", "analysis", "synthesis", "explanation"],
@@ -171,7 +226,7 @@ MODELS = {
     },
     "code": {
         "name": "DeepSeek Coder 6.7B",
-        "file": "deepseek-coder-6.7b-instruct.Q4_K_M.gguf",
+        "file": "deepseek-coder-6.7b-instruct.Q5_K_M.gguf",  # Upgraded from Q4_K_M for better code quality
         "port": 8093,
         "gpu_layers": 35,
         "context": 8192,
@@ -679,14 +734,26 @@ memory_manager = MemoryManager(DB_PATH)
 # --- RAG MANAGER (ChromaDB) ---
 
 class RAGManager:
+    """ChromaDB-based RAG manager with periodic refresh to prevent stale data."""
+
+    REFRESH_INTERVAL = 300  # Refresh collection every 5 minutes
+
     def __init__(self, persist_path: Path):
         self.persist_path = persist_path
         self.client = None
         self.collection = None
+        self._last_refresh = 0
 
     async def initialize(self):
         if not CHROMADB_AVAILABLE:
             return False
+
+        # Refresh collection if stale (prevents stale data issue from critical analysis)
+        now = time.time()
+        if self.client is not None and (now - self._last_refresh) > self.REFRESH_INTERVAL:
+            print("[RAG] Refreshing collection to prevent stale data...")
+            self.collection = self.client.get_collection("benchai_knowledge")
+            self._last_refresh = now
 
         if self.client is None:
             self.persist_path.mkdir(parents=True, exist_ok=True)
@@ -702,6 +769,7 @@ class RAGManager:
                     "hnsw:batch_size": 10000,      # Batch size before flushing
                 }
             )
+            self._last_refresh = now
             print(f"[RAG] ChromaDB initialized with {self.collection.count()} documents (HNSW optimized)")
         return True
 
@@ -1111,14 +1179,34 @@ class ModelManager:
 
             if not is_healthy:
                 # Check if process is still running but not responding
+                exit_reason = ""
                 if model_type in self.processes:
                     proc = self.processes[model_type]
                     if proc.poll() is not None:
-                        print(f"[HEALTH] {model_type} process died (exit code: {proc.returncode})")
+                        exit_code = proc.returncode
+                        # Decode exit code for better diagnostics
+                        if exit_code == -9:
+                            exit_reason = "SIGKILL (OOM or forced kill)"
+                        elif exit_code == -11:
+                            exit_reason = "SIGSEGV (memory corruption)"
+                        elif exit_code == -6:
+                            exit_reason = "SIGABRT (assertion failed)"
+                        else:
+                            exit_reason = f"code {exit_code}"
+                        print(f"[HEALTH] {model_type} process died ({exit_reason})")
                         del self.processes[model_type]
                     else:
                         print(f"[HEALTH] {model_type} not responding but process alive - killing")
                         await self.stop_model(model_type)
+
+                # Add cooldown to prevent rapid restart loops
+                last_restart = getattr(self, '_last_restart', {}).get(model_type, 0)
+                if time.time() - last_restart < 30:
+                    print(f"[HEALTH] {model_type} restart cooldown active, waiting...")
+                    continue
+                if not hasattr(self, '_last_restart'):
+                    self._last_restart = {}
+                self._last_restart[model_type] = time.time()
 
                 # Restart the model
                 print(f"[HEALTH] Restarting {model_type}...")
@@ -1279,8 +1367,17 @@ class ModelManager:
             str(LLAMA_SERVER), "-m", str(MODELS_DIR / config["file"]),
             "--host", "127.0.0.1", "--port", str(config["port"]),
             "-ngl", str(gpu_layers), "-c", str(config["context"]),
-            "-t", str(threads), "--slot-save-path", str(cache_dir)
+            "-t", str(threads), "--slot-save-path", str(cache_dir),
+            "--cont-batching", "-b", "512", "-ub", "256"
         ]
+        # Add flash attention for GPU mode (better memory efficiency)
+        if use_gpu and gpu_layers > 0:
+            cmd.extend(["--flash-attn", "on"])
+            # Note: Speculative decoding disabled - requires too much VRAM on RTX 3060
+            # Would need ~8GB free for both target + draft models
+        # Add mlock for CPU mode (prevents swapping/OOM kills)
+        if not use_gpu or gpu_layers == 0:
+            cmd.extend(["--mlock"])
         if "mmproj" in config:
             cmd.extend(["--mmproj", str(MODELS_DIR / config["mmproj"])])
 
@@ -4218,6 +4315,25 @@ def fix_reasoning_routing(plan: List[Dict], query: str) -> List[Dict]:
 
     return plan
 
+def complexity_score(query: str) -> float:
+    """Calculate query complexity for smarter routing (from deep research).
+
+    Score 0-1 where higher = more complex, needs smarter model.
+    """
+    factors = {
+        "length": min(len(query) / 1000, 0.3),  # Long queries are complex
+        "code_blocks": min(query.count("```") * 0.15, 0.3),  # Code blocks
+        "questions": min(query.count("?") * 0.1, 0.2),  # Multiple questions
+        "technical": 0.1 if any(t in query.lower() for t in [
+            "algorithm", "architecture", "optimize", "implement", "refactor",
+            "database", "api", "async", "concurrent", "performance"
+        ]) else 0,
+        "multi_step": 0.15 if any(w in query.lower() for w in [
+            "then", "after that", "next", "finally", "step", "first"
+        ]) else 0,
+    }
+    return min(sum(factors.values()), 1.0)
+
 def detect_intent(query: str, has_image: bool) -> str:
     """Quickly detect the primary intent without using the planner."""
     if IMAGE_GEN_PATTERNS.search(query):
@@ -4232,6 +4348,13 @@ def detect_intent(query: str, has_image: bool) -> str:
         return "memory"
     if RESEARCH_PATTERNS.search(query):
         return "research"
+
+    # Use complexity scoring for general queries (from deep research)
+    score = complexity_score(query)
+    if score > 0.5:
+        print(f"[ROUTING] Complex query (score={score:.2f}) → planner")
+        return "planner"  # Complex general → use smarter model
+
     return "general"
 
 # --- PARALLEL EXECUTOR ---
@@ -4719,6 +4842,9 @@ async def execute_parallel_steps(steps: List[Dict], messages_dicts: List[Dict], 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Track startup time for uptime metrics
+    app.state.start_time = time.time()
+
     # Initialize managers
     await memory_manager.initialize()
     await rag_manager.initialize()
@@ -4764,6 +4890,431 @@ async def health():
         }
     }
 
+@app.get("/v1/metrics")
+async def metrics():
+    """Get comprehensive system metrics for monitoring."""
+    # GPU stats
+    gpu_stats = {"available": False}
+    try:
+        result = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.used,memory.total,utilization.gpu,temperature.gpu", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode == 0:
+            parts = result.stdout.strip().split(", ")
+            if len(parts) >= 4:
+                gpu_stats = {
+                    "available": True,
+                    "memory_used_mb": int(parts[0]),
+                    "memory_total_mb": int(parts[1]),
+                    "utilization_percent": int(parts[2]),
+                    "temperature_c": int(parts[3]),
+                    "memory_percent": round(int(parts[0]) / int(parts[1]) * 100, 1)
+                }
+    except Exception:
+        pass
+
+    # Model stats
+    model_stats = []
+    for name, config in MODELS.items():
+        port = config["port"]
+        is_running = manager.is_running(name)
+        pid = manager.processes.get(name, None)
+        pid = pid.pid if pid else None
+        mode = config.get("mode", "cpu")
+        model_stats.append({
+            "name": name,
+            "display_name": config["name"],
+            "port": port,
+            "status": "running" if is_running else "stopped",
+            "pid": pid,
+            "mode": mode.upper(),
+            "file": config["file"]
+        })
+
+    # Memory stats
+    memory_stats = {"total": 0, "fts5": False}
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            async with db.execute("SELECT COUNT(*) FROM memories") as cursor:
+                row = await cursor.fetchone()
+                memory_stats["total"] = row[0] if row else 0
+            memory_stats["fts5"] = True
+    except Exception:
+        pass
+
+    # RAG stats
+    rag_stats = {"status": "disabled", "count": 0}
+    if CHROMADB_AVAILABLE and rag_manager.collection:
+        try:
+            rag_stats = {"status": "ready", "count": rag_manager.collection.count()}
+        except Exception:
+            rag_stats = {"status": "error", "count": 0}
+
+    # Cache stats
+    cache_stats = request_cache.stats()
+
+    # System uptime
+    uptime = time.time() - getattr(app.state, 'start_time', time.time())
+
+    return {
+        "timestamp": datetime.now().isoformat(),
+        "uptime_seconds": int(uptime),
+        "gpu": gpu_stats,
+        "models": model_stats,
+        "memory": memory_stats,
+        "rag": rag_stats,
+        "cache": cache_stats,
+        "features": {
+            "tts": PIPER_AVAILABLE,
+            "rag": CHROMADB_AVAILABLE,
+            "obsidian": OBSIDIAN_AVAILABLE
+        }
+    }
+
+@app.get("/dashboard", response_class=HTMLResponse)
+async def dashboard():
+    """Monitoring dashboard for BenchAI."""
+    html = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>BenchAI Monitor</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+            color: #e4e4e7;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .header {
+            text-align: center;
+            padding: 20px 0 30px;
+            border-bottom: 1px solid #374151;
+            margin-bottom: 30px;
+        }
+        .header h1 {
+            font-size: 2.5rem;
+            background: linear-gradient(90deg, #60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 5px;
+        }
+        .header .subtitle { color: #9ca3af; font-size: 0.9rem; }
+        .header .status {
+            display: inline-block;
+            margin-top: 10px;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+            font-weight: 500;
+        }
+        .status-ok { background: #065f46; color: #34d399; }
+        .status-error { background: #7f1d1d; color: #fca5a5; }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+            gap: 20px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+        .card {
+            background: rgba(30, 41, 59, 0.8);
+            border: 1px solid #374151;
+            border-radius: 12px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+        }
+        .card h2 {
+            font-size: 1rem;
+            color: #9ca3af;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .card h2 .icon { font-size: 1.2rem; }
+        .metric {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-bottom: 1px solid #374151;
+        }
+        .metric:last-child { border-bottom: none; }
+        .metric-label { color: #9ca3af; font-size: 0.9rem; }
+        .metric-value {
+            font-size: 1.1rem;
+            font-weight: 600;
+            color: #e4e4e7;
+        }
+        .metric-value.good { color: #34d399; }
+        .metric-value.warn { color: #fbbf24; }
+        .metric-value.bad { color: #f87171; }
+        .progress-bar {
+            width: 100%;
+            height: 8px;
+            background: #374151;
+            border-radius: 4px;
+            overflow: hidden;
+            margin-top: 8px;
+        }
+        .progress-fill {
+            height: 100%;
+            border-radius: 4px;
+            transition: width 0.5s ease;
+        }
+        .progress-fill.gpu { background: linear-gradient(90deg, #60a5fa, #a78bfa); }
+        .progress-fill.cache { background: linear-gradient(90deg, #34d399, #22d3d3); }
+        .model-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px;
+            background: rgba(55, 65, 81, 0.5);
+            border-radius: 8px;
+            margin-bottom: 10px;
+        }
+        .model-item:last-child { margin-bottom: 0; }
+        .model-name { font-weight: 500; }
+        .model-meta { font-size: 0.8rem; color: #9ca3af; }
+        .model-status {
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.75rem;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+        .model-status.running { background: #065f46; color: #34d399; }
+        .model-status.stopped { background: #7f1d1d; color: #fca5a5; }
+        .model-status.gpu { background: #5b21b6; color: #c4b5fd; }
+        .model-status.cpu { background: #1e40af; color: #93c5fd; }
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+        }
+        .feature-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 10px;
+            background: rgba(55, 65, 81, 0.5);
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+        .feature-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+        .feature-dot.enabled { background: #34d399; }
+        .feature-dot.disabled { background: #6b7280; }
+        .refresh-info {
+            text-align: center;
+            padding: 15px;
+            color: #6b7280;
+            font-size: 0.85rem;
+        }
+        .big-number {
+            font-size: 2.5rem;
+            font-weight: 700;
+            background: linear-gradient(90deg, #60a5fa, #a78bfa);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+        }
+        .card.wide { grid-column: span 2; }
+        @media (max-width: 700px) { .card.wide { grid-column: span 1; } }
+    </style>
+</head>
+<body>
+    <div class="header">
+        <h1>BenchAI Monitor</h1>
+        <div class="subtitle">Intelligent LLM Orchestration Platform</div>
+        <div id="status" class="status status-ok">● Connected</div>
+    </div>
+
+    <div class="grid">
+        <div class="card">
+            <h2><span class="icon">🎮</span> GPU Status</h2>
+            <div id="gpu-content">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2><span class="icon">⚡</span> Cache Performance</h2>
+            <div id="cache-content">Loading...</div>
+        </div>
+
+        <div class="card wide">
+            <h2><span class="icon">🤖</span> Models</h2>
+            <div id="models-content">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2><span class="icon">🧠</span> Memory System</h2>
+            <div id="memory-content">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2><span class="icon">📚</span> RAG Knowledge Base</h2>
+            <div id="rag-content">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2><span class="icon">✨</span> Features</h2>
+            <div id="features-content">Loading...</div>
+        </div>
+
+        <div class="card">
+            <h2><span class="icon">📊</span> System</h2>
+            <div id="system-content">Loading...</div>
+        </div>
+    </div>
+
+    <div class="refresh-info">Auto-refreshes every 5 seconds</div>
+
+    <script>
+        function formatUptime(seconds) {
+            const h = Math.floor(seconds / 3600);
+            const m = Math.floor((seconds % 3600) / 60);
+            const s = seconds % 60;
+            if (h > 0) return `${h}h ${m}m ${s}s`;
+            if (m > 0) return `${m}m ${s}s`;
+            return `${s}s`;
+        }
+
+        async function fetchMetrics() {
+            try {
+                const res = await fetch('/v1/metrics');
+                const data = await res.json();
+                updateDashboard(data);
+                document.getElementById('status').className = 'status status-ok';
+                document.getElementById('status').textContent = '● Connected';
+            } catch (e) {
+                document.getElementById('status').className = 'status status-error';
+                document.getElementById('status').textContent = '● Disconnected';
+            }
+        }
+
+        function updateDashboard(data) {
+            // GPU
+            const gpu = data.gpu;
+            if (gpu.available) {
+                const memPct = gpu.memory_percent;
+                const color = memPct > 90 ? 'bad' : memPct > 70 ? 'warn' : 'good';
+                document.getElementById('gpu-content').innerHTML = `
+                    <div class="metric">
+                        <span class="metric-label">Memory Used</span>
+                        <span class="metric-value">${gpu.memory_used_mb} / ${gpu.memory_total_mb} MB</span>
+                    </div>
+                    <div class="progress-bar"><div class="progress-fill gpu" style="width: ${memPct}%"></div></div>
+                    <div class="metric">
+                        <span class="metric-label">Utilization</span>
+                        <span class="metric-value ${color}">${gpu.utilization_percent}%</span>
+                    </div>
+                    <div class="metric">
+                        <span class="metric-label">Temperature</span>
+                        <span class="metric-value ${gpu.temperature_c > 80 ? 'bad' : gpu.temperature_c > 60 ? 'warn' : 'good'}">${gpu.temperature_c}°C</span>
+                    </div>
+                `;
+            } else {
+                document.getElementById('gpu-content').innerHTML = '<div class="metric"><span class="metric-value bad">GPU Not Available</span></div>';
+            }
+
+            // Cache
+            const cache = data.cache;
+            document.getElementById('cache-content').innerHTML = `
+                <div class="metric">
+                    <span class="metric-label">Hit Rate</span>
+                    <span class="metric-value good">${cache.hit_rate}</span>
+                </div>
+                <div class="progress-bar"><div class="progress-fill cache" style="width: ${parseFloat(cache.hit_rate)}%"></div></div>
+                <div class="metric">
+                    <span class="metric-label">Hits / Misses</span>
+                    <span class="metric-value">${cache.hits} / ${cache.misses}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Cached Responses</span>
+                    <span class="metric-value">${cache.size} / ${cache.max_size}</span>
+                </div>
+            `;
+
+            // Models
+            document.getElementById('models-content').innerHTML = data.models.map(m => `
+                <div class="model-item">
+                    <div>
+                        <div class="model-name">${m.display_name}</div>
+                        <div class="model-meta">Port ${m.port} • ${m.file}</div>
+                    </div>
+                    <div style="display: flex; gap: 8px;">
+                        <span class="model-status ${m.mode.toLowerCase()}">${m.mode}</span>
+                        <span class="model-status ${m.status}">${m.status}</span>
+                    </div>
+                </div>
+            `).join('');
+
+            // Memory
+            document.getElementById('memory-content').innerHTML = `
+                <div style="text-align: center; padding: 20px 0;">
+                    <div class="big-number">${data.memory.total}</div>
+                    <div style="color: #9ca3af; margin-top: 5px;">Total Memories</div>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">FTS5 Search</span>
+                    <span class="metric-value ${data.memory.fts5 ? 'good' : 'bad'}">${data.memory.fts5 ? 'Enabled' : 'Disabled'}</span>
+                </div>
+            `;
+
+            // RAG
+            document.getElementById('rag-content').innerHTML = `
+                <div style="text-align: center; padding: 20px 0;">
+                    <div class="big-number">${data.rag.count}</div>
+                    <div style="color: #9ca3af; margin-top: 5px;">Documents Indexed</div>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Status</span>
+                    <span class="metric-value ${data.rag.status === 'ready' ? 'good' : 'bad'}">${data.rag.status.toUpperCase()}</span>
+                </div>
+            `;
+
+            // Features
+            const features = data.features;
+            document.getElementById('features-content').innerHTML = `
+                <div class="feature-grid">
+                    <div class="feature-item"><span class="feature-dot enabled"></span>Streaming</div>
+                    <div class="feature-item"><span class="feature-dot enabled"></span>Memory</div>
+                    <div class="feature-item"><span class="feature-dot ${features.tts ? 'enabled' : 'disabled'}"></span>TTS</div>
+                    <div class="feature-item"><span class="feature-dot ${features.rag ? 'enabled' : 'disabled'}"></span>RAG</div>
+                    <div class="feature-item"><span class="feature-dot ${features.obsidian ? 'enabled' : 'disabled'}"></span>Obsidian</div>
+                    <div class="feature-item"><span class="feature-dot enabled"></span>Caching</div>
+                </div>
+            `;
+
+            // System
+            document.getElementById('system-content').innerHTML = `
+                <div class="metric">
+                    <span class="metric-label">Uptime</span>
+                    <span class="metric-value good">${formatUptime(data.uptime_seconds)}</span>
+                </div>
+                <div class="metric">
+                    <span class="metric-label">Last Updated</span>
+                    <span class="metric-value">${new Date(data.timestamp).toLocaleTimeString()}</span>
+                </div>
+            `;
+        }
+
+        fetchMetrics();
+        setInterval(fetchMetrics, 5000);
+    </script>
+</body>
+</html>"""
+    return HTMLResponse(content=html)
+
 @app.get("/v1/models")
 async def list_models():
     models_list = [
@@ -4778,6 +5329,12 @@ async def list_models():
 @app.post("/v1/chat/completions")
 async def chat_completions(request: ChatRequest):
     messages_dicts = [m.model_dump() for m in request.messages]
+
+    # Check cache first (skip for streaming requests)
+    if not request.stream:
+        cached = request_cache.get(request.model, messages_dicts, request.max_tokens)
+        if cached:
+            return cached
 
     # Get or create session for conversation context
     session_id, session = session_manager.get_or_create_session(messages_dicts)
@@ -4852,13 +5409,17 @@ async def chat_completions(request: ChatRequest):
 
         await memory_manager.log_conversation("assistant", ans)
 
-        return {
+        response = {
             "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
             "created": int(time.time()),
             "model": request.model,
             "choices": [{"index": 0, "message": {"role": "assistant", "content": ans}, "finish_reason": "stop"}]
         }
+
+        # Cache the response
+        request_cache.set(request.model, messages_dicts, request.max_tokens, response)
+        return response
 
     # Agentic Plan & Execute
     session_context = session_manager.get_context_for_planner(session_id)
@@ -5617,7 +6178,14 @@ async def chat_completions(request: ChatRequest):
 
             elif tool == "reasoning":
                 intent = detect_intent(str(args), has_image)
-                target_model = "code" if intent == "code" else "research"
+                # Route based on intent: code → code model, complex → planner, else → research
+                if intent == "code":
+                    target_model = "code"
+                elif intent == "planner":
+                    target_model = "planner"
+                else:
+                    target_model = "research"
+                print(f"[TOOL:REASONING] Intent: {intent} → Model: {target_model}")
 
                 msgs = [
                     {"role": "system", "content": "You are BenchAI, an expert engineering assistant. Be helpful, accurate, and concise."},
@@ -5653,13 +6221,19 @@ async def chat_completions(request: ChatRequest):
     # Add assistant turn to session for follow-up context
     session_manager.add_turn(session_id, "assistant", final_response)
 
-    return {
+    response = {
         "id": f"chatcmpl-{int(time.time())}",
         "object": "chat.completion",
         "created": int(time.time()),
         "model": "auto-agent",
         "choices": [{"index": 0, "message": {"role": "assistant", "content": final_response}, "finish_reason": "stop"}]
     }
+
+    # Cache the response for future identical requests
+    if not request.stream:
+        request_cache.set(request.model, messages_dicts, request.max_tokens, response)
+
+    return response
 
 @app.post("/v1/images/generations")
 async def generate_image_endpoint(request: ImageRequest):
@@ -5670,6 +6244,11 @@ async def generate_image_endpoint(request: ImageRequest):
     raise HTTPException(500, res)
 
 # --- MEMORY ENDPOINTS ---
+
+@app.get("/v1/cache/stats")
+async def cache_stats():
+    """Get request cache statistics."""
+    return request_cache.stats()
 
 @app.post("/v1/memory/add")
 async def add_memory(request: MemoryRequest):

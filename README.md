@@ -1,112 +1,102 @@
-# BenchAI - Local AI Engineering Assistant
+# BenchAI
 
-Self-hosted AI orchestration platform with agentic planning, 88+ tools, persistent memory, RAG, and IDE integrations. Run entirely on your own hardware.
+**Self-hosted AI orchestration platform for software engineering**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/version-3.0.0-green.svg)](CHANGELOG.md)
+
+BenchAI is a local LLM router that orchestrates multiple AI models for software engineering tasks. Run entirely on your hardware with zero API costs, full privacy, and complete customization.
+
+---
 
 ## Features
 
-- **Agentic Planner** - Multi-step task orchestration with parallel execution
-- **88+ Tools** - Docker, Git, GitHub, file ops, web search, code execution
-- **Persistent Memory** - SQLite with FTS5 full-text search
-- **RAG Pipeline** - ChromaDB vector database for codebase indexing
-- **Streaming** - Real-time Server-Sent Events responses
-- **Multi-Model Routing** - Auto-select between general, code, research, and vision models
-- **IDE Integration** - VS Code (Continue.dev), Neovim (Avante.nvim), CLI tool
-- **OpenAI Compatible** - Standard OpenAI API format
+| Feature | Description |
+|---------|-------------|
+| **Multi-Model Routing** | Automatic selection between 4 specialized models |
+| **Agentic Planner** | Multi-step task orchestration with parallel tool execution |
+| **88+ Tools** | Shell, Git, GitHub, Docker, file ops, web search, and more |
+| **Persistent Memory** | SQLite with FTS5 full-text search |
+| **RAG Pipeline** | ChromaDB vector database for codebase indexing |
+| **Request Caching** | 100x+ faster responses on repeated queries |
+| **Streaming** | Real-time SSE responses |
+| **Monitoring Dashboard** | Web UI with real-time metrics |
+| **OpenAI Compatible** | Drop-in replacement for OpenAI API |
 
-## Architecture
-
-```
-┌──────────────────────────────────────────────────────┐
-│            Clients (CLI, IDE, WebUI)                 │
-└────────────────────┬─────────────────────────────────┘
-                     │
-┌────────────────────▼─────────────────────────────────┐
-│              BenchAI Router (:8085)                   │
-│  ┌─────────┐  ┌────────┐  ┌─────┐  ┌──────────┐    │
-│  │ Planner │  │ Memory │  │ RAG │  │ Executor │    │
-│  └────┬────┘  └───┬────┘  └──┬──┘  └────┬─────┘    │
-└───────┼───────────┼──────────┼──────────┼───────────┘
-        │           │          │          │
-   ┌────▼──────┬────▼───┬──────▼────┬─────▼────┐
-   │ LLM Pool  │ SQLite │ ChromaDB  │  Tools   │
-   │ (4 models)│  +FTS5 │           │   (88+)  │
-   └───────────┴────────┴───────────┴──────────┘
-```
-
-## Hardware Requirements
-
-| Component | Minimum | Recommended |
-|-----------|---------|-------------|
-| RAM | 16GB | 32GB+ |
-| GPU | 8GB VRAM (RTX 3060) | 12GB+ VRAM |
-| Storage | 50GB free | 100GB+ SSD |
-| CPU | 4+ cores | 8+ cores |
+---
 
 ## Quick Start
 
 ```bash
-# 1. Clone repository
+# Clone repository
 git clone https://github.com/YOUR_USERNAME/benchai.git
 cd benchai
 
-# 2. Run installer
+# Run installer
 ./scripts/install.sh
 
-# 3. Start service
+# Start service
 sudo systemctl start benchai
 
-# 4. Verify health
+# Verify
 curl http://localhost:8085/health
 
-# 5. Install client tools (optional)
-cd ../benchai-client
-./install.sh
+# Open dashboard
+xdg-open http://localhost:8085/dashboard
 ```
 
-## Documentation
+---
 
-| Document | Description |
-|----------|-------------|
-| [Installation Guide](docs/INSTALLATION.md) | Server setup and configuration |
-| [User Guide](docs/USER-GUIDE.md) | Using BenchAI features |
-| [API Reference](docs/API.md) | Endpoints and examples |
-| [Tools Reference](docs/TOOLS.md) | All 88+ available tools |
-| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues and fixes |
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     Clients                              │
+│   CLI  │  VS Code  │  Neovim  │  WebUI  │  Any HTTP     │
+└────────────────────────┬────────────────────────────────┘
+                         │
+┌────────────────────────▼────────────────────────────────┐
+│                BenchAI Router (:8085)                    │
+│  ┌──────────┐ ┌──────────┐ ┌─────────┐ ┌─────────────┐  │
+│  │ Planner  │ │  Memory  │ │   RAG   │ │    Cache    │  │
+│  └──────────┘ └──────────┘ └─────────┘ └─────────────┘  │
+└─────────────────────────────────────────────────────────┘
+         │              │           │            │
+    ┌────▼────┐    ┌────▼───┐  ┌────▼───┐   ┌────▼────┐
+    │  LLMs   │    │ SQLite │  │ChromaDB│   │  Tools  │
+    │ (4 models)│   │ +FTS5  │  │ (HNSW) │   │  (88+)  │
+    └─────────┘    └────────┘  └────────┘   └─────────┘
+```
+
+---
 
 ## Models
 
-BenchAI runs 4 local models with automatic routing:
+| Model | Purpose | Size | Mode |
+|-------|---------|------|------|
+| **Phi-3 Mini** | Fast general queries | 2.4GB | CPU |
+| **Qwen2.5 7B** | Planning, research, analysis | 5.1GB | CPU |
+| **DeepSeek Coder 6.7B** | Code generation, debugging | 4.5GB | GPU |
+| **Qwen2-VL 7B** | Vision, OCR, image analysis | 4.5GB | On-demand |
 
-| Model | Use Case | Size | Port |
-|-------|----------|------|------|
-| Phi-3 Mini | General queries, fast responses | 2.4GB | 8091 |
-| Qwen2.5 7B | Planning, research, analysis | 4.4GB | 8092 |
-| DeepSeek Coder 6.7B | Code generation, debugging | 4.0GB | 8093 |
-| Qwen2-VL 7B | Vision, OCR, image analysis | 4.5GB | 8094 |
+Use `model: "auto"` for automatic routing based on query type.
 
-**Auto-routing** selects the best model based on your query.
+---
 
-## Client Tools
+## Hardware Requirements
 
-Install the [benchai-client](../benchai-client) for:
+| Tier | GPU | RAM | Performance |
+|------|-----|-----|-------------|
+| Minimum | 8GB VRAM | 16GB | Basic functionality |
+| Recommended | 12GB VRAM | 32GB | Full features |
+| Optimal | 24GB+ VRAM | 64GB | Maximum performance |
 
-- **CLI Tool** - Terminal-based chat with streaming
-- **VS Code** - Continue.dev integration
-- **Neovim** - Avante.nvim plugin
-
-```bash
-cd benchai-client
-./install.sh
-```
+---
 
 ## API Examples
 
-### Health Check
-```bash
-curl http://localhost:8085/health
-```
-
 ### Chat Completion
+
 ```bash
 curl -X POST http://localhost:8085/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -117,7 +107,8 @@ curl -X POST http://localhost:8085/v1/chat/completions \
   }'
 ```
 
-### Streaming Chat
+### Streaming
+
 ```bash
 curl -X POST http://localhost:8085/v1/chat/completions \
   -H "Content-Type: application/json" \
@@ -128,54 +119,161 @@ curl -X POST http://localhost:8085/v1/chat/completions \
   }'
 ```
 
-### Memory Operations
+### Memory
+
 ```bash
 # Add memory
 curl -X POST http://localhost:8085/v1/memory/add \
   -H "Content-Type: application/json" \
   -d '{"content": "User prefers Python", "category": "preference"}'
 
-# Search memory
+# Search
 curl "http://localhost:8085/v1/memory/search?q=Python"
-
-# Get stats
-curl http://localhost:8085/v1/memory/stats
 ```
 
 ### RAG Search
+
 ```bash
-# Search indexed codebase
 curl "http://localhost:8085/v1/rag/search?q=authentication&limit=5"
 ```
 
-See [API Reference](docs/API.md) for complete documentation.
+### Metrics
+
+```bash
+curl http://localhost:8085/v1/metrics | jq
+```
+
+---
+
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [Installation](docs/INSTALLATION.md) | Setup and configuration |
+| [User Guide](docs/USER-GUIDE.md) | Features and usage |
+| [API Reference](docs/API.md) | Endpoints and parameters |
+| [Architecture](docs/ARCHITECTURE.md) | System design |
+| [Performance](docs/PERFORMANCE.md) | Benchmarks and tuning |
+| [Tools Reference](docs/TOOLS.md) | All 88+ tools |
+| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues |
+| [Research](docs/RESEARCH.md) | LLM optimization techniques |
+
+---
+
+## Monitoring
+
+Access the dashboard at `http://localhost:8085/dashboard`
+
+![Dashboard Preview](docs/images/dashboard-preview.png)
+
+Features:
+- GPU memory and temperature
+- Model status (running/stopped)
+- Cache hit rate
+- Memory entries
+- RAG document count
+- System uptime
+
+---
+
+## Client Integrations
+
+### CLI Tool
+```bash
+cd benchai-client
+./install.sh
+benchai "explain this code"
+```
+
+### VS Code (Continue.dev)
+See [Continue.dev setup](docs/INSTALLATION.md#vs-code)
+
+### Neovim (Avante.nvim)
+See [Avante.nvim setup](docs/INSTALLATION.md#neovim)
+
+---
+
+## Performance
+
+| Metric | Value |
+|--------|-------|
+| Cache hit latency | ~30ms |
+| Code model (GPU) | 30-40 tok/s |
+| General model (CPU) | 12-15 tok/s |
+| Cache speedup | 100-300x |
+
+See [Performance Guide](docs/PERFORMANCE.md) for optimization details.
+
+---
 
 ## Service Management
 
 ```bash
-# Start service
+# Start
 sudo systemctl start benchai
 
-# Stop service
+# Stop
 sudo systemctl stop benchai
 
-# View logs
+# Restart
+sudo systemctl restart benchai
+
+# Logs
 sudo journalctl -u benchai -f
 
-# Restart service
-sudo systemctl restart benchai
+# Status
+sudo systemctl status benchai
 ```
 
-## License
+---
 
-MIT License
+## Development
+
+### Prerequisites
+- Python 3.10+
+- llama.cpp (with CUDA support)
+- ChromaDB
+- SQLite with FTS5
+
+### Local Development
+```bash
+cd router
+python3 llm_router.py
+```
+
+### Testing
+```bash
+# Health check
+curl http://localhost:8085/health
+
+# Chat test
+curl -X POST http://localhost:8085/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"general","messages":[{"role":"user","content":"ping"}],"max_tokens":10}'
+```
+
+---
 
 ## Contributing
 
 1. Fork the repository
 2. Create a feature branch
-3. Make your changes
-4. Test thoroughly
-5. Submit a pull request
+3. Make changes with tests
+4. Submit a pull request
 
-For bugs and feature requests, open an issue with details.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+---
+
+## License
+
+MIT License - see [LICENSE](LICENSE)
+
+---
+
+## Acknowledgments
+
+- [llama.cpp](https://github.com/ggerganov/llama.cpp) - LLM inference engine
+- [FastAPI](https://fastapi.tiangolo.com/) - Web framework
+- [ChromaDB](https://www.trychroma.com/) - Vector database
+- [HuggingFace](https://huggingface.co/) - Model hosting
