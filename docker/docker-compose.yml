@@ -46,69 +46,26 @@ services:
       - SEARXNG_BASE_URL=http://localhost:8081
 
   # ===================
-  # REMOTE ACCESS
+  # REMOTE ACCESS (Optional)
   # ===================
 
   # Twingate Connector (for remote access)
-  twingate-connector:
-    image: twingate/connector:latest
-    container_name: twingate-connector
-    restart: always
-    environment:
-      - TWINGATE_URL=${TWINGATE_URL}
-      - TWINGATE_ACCESS_TOKEN=${TWINGATE_ACCESS_TOKEN}
-      - TWINGATE_REFRESH_TOKEN=${TWINGATE_REFRESH_TOKEN}
-    sysctls:
-      - net.ipv4.ping_group_range=0 2147483647
-    healthcheck:
-      test: ["CMD", "/connectorctl", "health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # ===================
-  # MEDIA (OPTIONAL)
-  # ===================
-
-  # Jellyfin - Media Server
-  jellyfin:
-    image: jellyfin/jellyfin:latest
-    container_name: jellyfin
-    restart: unless-stopped
-    ports:
-      - "8096:8096"
-    volumes:
-      - ./jellyfin/config:/config
-      - ./jellyfin/cache:/cache
-      - /path/to/media:/media:ro
-    environment:
-      - JELLYFIN_PublishedServerUrl=http://localhost:8096
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
-
-  # ===================
-  # DASHBOARD
-  # ===================
-
-  # Glance - Simple Dashboard
-  glance:
-    image: glanceapp/glance:latest
-    container_name: glance
-    restart: unless-stopped
-    ports:
-      - "8280:8080"
-    volumes:
-      - ./glance/glance.yml:/app/glance.yml
+  # Uncomment and configure if you want remote access
+  # twingate-connector:
+  #   image: twingate/connector:latest
+  #   container_name: twingate-connector
+  #   restart: always
+  #   environment:
+  #     - TWINGATE_URL=${TWINGATE_URL}
+  #     - TWINGATE_ACCESS_TOKEN=${TWINGATE_ACCESS_TOKEN}
+  #     - TWINGATE_REFRESH_TOKEN=${TWINGATE_REFRESH_TOKEN}
+  #   sysctls:
+  #     - net.ipv4.ping_group_range=0 2147483647
+  #   healthcheck:
+  #     test: ["CMD", "/connectorctl", "health"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
 
 # Networks
 networks:
