@@ -229,6 +229,26 @@ GPU_ONLY_MODELS = ["vision"]  # Models that require GPU (can't run on CPU effect
 CORE_MODELS = ["general", "planner", "code"]  # Essential models to start on boot
 HEALTH_CHECK_INTERVAL = 60  # Seconds between health checks
 
+# --- REQUEST CONCURRENCY LIMITING ---
+# Limit concurrent requests per model to prevent severe queueing
+# llama-server processes requests sequentially, so limiting prevents long queues
+MAX_CONCURRENT_REQUESTS = {
+    "general": 2,   # Fast model, can handle slight queueing
+    "planner": 2,   # Critical for orchestration
+    "research": 1,  # Slower model, avoid queueing
+    "code": 1,      # CPU-heavy, no queueing to prevent blocking
+    "vision": 1,    # GPU-heavy, one at a time
+}
+# Semaphores are created lazily when first request comes in
+_model_semaphores: Dict[str, asyncio.Semaphore] = {}
+
+def get_model_semaphore(model_type: str) -> asyncio.Semaphore:
+    """Get or create semaphore for a model type."""
+    if model_type not in _model_semaphores:
+        max_concurrent = MAX_CONCURRENT_REQUESTS.get(model_type, 1)
+        _model_semaphores[model_type] = asyncio.Semaphore(max_concurrent)
+    return _model_semaphores[model_type]
+
 def check_gpu_available(min_free_mb: int = GPU_VRAM_THRESHOLD) -> tuple[bool, int, int]:
     """
     Check if GPU has enough free VRAM for a model.
@@ -410,7 +430,7 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
     model: Optional[str] = None
     temperature: Optional[float] = 0.7
-    max_tokens: Optional[int] = 2048
+    max_tokens: Optional[int] = 1024  # Reduced from 2048 for faster responses
     stream: Optional[bool] = False
 
 class ImageRequest(BaseModel):
@@ -855,19 +875,25 @@ class SessionManager:
         self.session_ttl = session_ttl  # 1 hour default
 
     def _get_session_id(self, messages: List[Dict]) -> str:
-        """Generate session ID from conversation - use hash of first message or create new."""
-        # If we have conversation history, use it to identify the session
+        """Generate session ID from conversation - use hash of ALL messages for uniqueness."""
+        # For multi-turn conversations, hash ALL messages to avoid session collision
+        # Single-turn requests (IDE) will get unique sessions per request
         if messages and len(messages) > 0:
-            # Use first user message as session anchor
+            # Collect all message content for unique hash
+            all_content = []
             for msg in messages:
-                if msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if isinstance(content, list):
-                        content = str(content[:100])
-                    else:
-                        content = str(content)[:100]
-                    return hashlib.md5(content.encode()).hexdigest()[:12]
-        return hashlib.md5(str(time.time()).encode()).hexdigest()[:12]
+                role = msg.get("role", "")
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    # Handle multimodal content
+                    text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                    content = " ".join(text_parts)
+                all_content.append(f"{role}:{content}")
+
+            # Hash the full conversation for unique session ID
+            full_hash = hashlib.sha256("|||".join(all_content).encode()).hexdigest()[:16]
+            return full_hash
+        return hashlib.sha256(str(time.time()).encode()).hexdigest()[:16]
 
     def get_or_create_session(self, messages: List[Dict]) -> tuple:
         """Get existing session or create new one. Returns (session_id, session_data)."""
@@ -1584,16 +1610,25 @@ async def execute_reasoning(messages: List[Dict], model_type: str = "research") 
     if model_type not in MODELS:
         model_type = "research"
 
-    if not await manager.start_model(model_type):
-        return f"Reasoning failed: Could not start {model_type} model"
-
-    port = MODELS[model_type]["port"]
+    # Check concurrency limit - avoid queueing
+    semaphore = get_model_semaphore(model_type)
+    try:
+        # Try to acquire within 5 seconds, otherwise return busy
+        await asyncio.wait_for(semaphore.acquire(), timeout=5.0)
+    except asyncio.TimeoutError:
+        print(f"[BUSY] Model {model_type} at capacity, rejecting request")
+        return f"Model {model_type} is currently busy. Please try again in a moment."
 
     try:
+        if not await manager.start_model(model_type):
+            return f"Reasoning failed: Could not start {model_type} model"
+
+        port = MODELS[model_type]["port"]
+
         # Adjust for CPU mode
         gpu_available, _, _ = check_gpu_available()
         timeout = 300.0 if gpu_available else 600.0
-        max_tokens = 2048 if gpu_available else 1024
+        max_tokens = 1024 if gpu_available else 512  # Reduced for faster responses
 
         payload = {"messages": messages, "max_tokens": max_tokens, "temperature": 0.7}
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -1615,6 +1650,8 @@ async def execute_reasoning(messages: List[Dict], model_type: str = "research") 
         return "Request timed out after 5 minutes"
     except Exception as e:
         return f"Reasoning error: {str(e)}"
+    finally:
+        semaphore.release()
 
 async def execute_reasoning_stream(messages: List[Dict], model_type: str = "research") -> AsyncGenerator[str, None]:
     """Stream reasoning/text generation with specified model."""
@@ -1634,7 +1671,7 @@ async def execute_reasoning_stream(messages: List[Dict], model_type: str = "rese
             async with client.stream(
                 "POST",
                 f"http://127.0.0.1:{port}/v1/chat/completions",
-                json={"messages": messages, "max_tokens": 2048, "temperature": 0.7, "stream": True}
+                json={"messages": messages, "max_tokens": 1024, "temperature": 0.7, "stream": True}
             ) as resp:
                 async for line in resp.aiter_lines():
                     if line.startswith("data: "):
@@ -1671,24 +1708,33 @@ async def execute_code_task(task: str, language: str = "python", execute: bool =
     }
     lang = lang_map.get(language.lower(), language.lower())
 
-    # Start DeepSeek Coder
-    if not await manager.start_model("code"):
-        return "Code generation failed: Could not start DeepSeek Coder model"
+    # Check concurrency limit for code model
+    semaphore = get_model_semaphore("code")
+    try:
+        await asyncio.wait_for(semaphore.acquire(), timeout=5.0)
+    except asyncio.TimeoutError:
+        print(f"[BUSY] Code model at capacity, rejecting request")
+        return "Code model is currently busy processing another request. Please try again in a moment."
 
-    port = MODELS["code"]["port"]
+    try:
+        # Start DeepSeek Coder
+        if not await manager.start_model("code"):
+            return "Code generation failed: Could not start DeepSeek Coder model"
 
-    # Prompt DeepSeek to generate code
-    lang_hints = {
-        "cpp": "Use #include <iostream>, #include <vector>, etc. as needed.",
-        "c": "Use #include <stdio.h>, #include <stdlib.h>, etc. as needed.",
-        "cuda": "Use #include <cuda_runtime.h> and proper __global__ kernel syntax.",
-        "python": "Use standard library imports as needed.",
-        "javascript": "Use modern ES6+ syntax.",
-        "typescript": "Include proper type annotations.",
-    }
-    hint = lang_hints.get(lang, "")
+        port = MODELS["code"]["port"]
 
-    code_prompt = f"""Write complete, runnable {lang} code for the following task.
+        # Prompt DeepSeek to generate code
+        lang_hints = {
+            "cpp": "Use #include <iostream>, #include <vector>, etc. as needed.",
+            "c": "Use #include <stdio.h>, #include <stdlib.h>, etc. as needed.",
+            "cuda": "Use #include <cuda_runtime.h> and proper __global__ kernel syntax.",
+            "python": "Use standard library imports as needed.",
+            "javascript": "Use modern ES6+ syntax.",
+            "typescript": "Include proper type annotations.",
+        }
+        hint = lang_hints.get(lang, "")
+
+        code_prompt = f"""Write complete, runnable {lang} code for the following task.
 
 Task: {task}
 
@@ -1703,15 +1749,14 @@ Return ONLY the complete code, no explanations before or after.
 
 ```{lang}"""
 
-    try:
         # Check if GPU is available - adjust timeout and tokens for CPU mode
         gpu_available, _, _ = check_gpu_available()
         if gpu_available:
-            timeout = 120.0   # GPU: fast inference
-            max_tokens = 2048
+            timeout = 90.0    # GPU: fast inference, reduced from 120s
+            max_tokens = 1024  # Reduced from 2048 for faster responses
         else:
-            timeout = 600.0   # CPU: ~2 tok/s, need more time
-            max_tokens = 1024  # Reduce tokens for faster response
+            timeout = 300.0   # CPU: reduced from 600s to prevent queue blocking
+            max_tokens = 768   # Balanced: enough for useful code, fast enough
             print(f"[CODE] CPU mode: timeout={timeout}s, max_tokens={max_tokens}")
 
         async with httpx.AsyncClient(timeout=timeout) as client:
@@ -1800,6 +1845,8 @@ Return ONLY the complete code, no explanations before or after.
         return "Code generation timed out"
     except Exception as e:
         return f"Code generation error: {str(e)}"
+    finally:
+        semaphore.release()
 
 
 # --- ENGINEERING ASSISTANT TOOLS ---
