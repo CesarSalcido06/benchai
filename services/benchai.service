@@ -12,14 +12,14 @@ Environment="PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="HOME=/home/user"
 
 # Kill any orphan processes before starting
-ExecStartPre=/bin/bash -c 'pkill -9 -f "llm_router.py" 2>/dev/null || true'
-ExecStartPre=/bin/bash -c 'sleep 1'
+ExecStartPre=/bin/bash -c 'pgrep -f "python3.*llm_router" | xargs -r kill -9 2>/dev/null || true'
+ExecStartPre=/bin/sleep 1
 
 ExecStart=/usr/bin/python3 /home/user/llama.cpp/router/llm_router.py
 
 # Cleanup after stop
-ExecStopPost=/bin/bash -c 'pkill -9 -f "llm_router.py" 2>/dev/null || true'
-ExecStopPost=/bin/bash -c 'pkill -9 -f "llama-server" 2>/dev/null || true'
+ExecStopPost=/bin/bash -c 'pgrep -f "python3.*llm_router" | xargs -r kill -9 2>/dev/null || true'
+ExecStopPost=/bin/bash -c 'pgrep -f "llama-server" | xargs -r kill -9 2>/dev/null || true'
 
 Restart=on-failure
 RestartSec=10
