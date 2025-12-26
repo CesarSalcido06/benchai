@@ -1,0 +1,15 @@
+[Unit]
+Description=Hydroxide - ProtonMail Bridge
+After=network.target
+
+[Service]
+Type=simple
+User=user
+Group=user
+ExecStart=/usr/local/bin/hydroxide -carddav-port 8180 serve
+Restart=on-failure
+RestartSec=10
+Environment="HOME=/home/user"
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,116 @@
+# BenchAI Docker Services
+# Required services for full BenchAI functionality
+
+version: "3.8"
+
+services:
+  # ===================
+  # CORE SERVICES
+  # ===================
+
+  # Open WebUI - Chat Interface
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:main
+    container_name: open-webui
+    restart: unless-stopped
+    ports:
+      - "3000:8080"
+    volumes:
+      - ./open-webui:/app/backend/data
+    environment:
+      - ENABLE_SIGNUP=true
+      - WEBUI_AUTH=false
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OPENAI_API_BASE_URL=http://host.docker.internal:8085/v1
+      - OPENAI_API_KEY=not-needed
+      - RAG_WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # SearXNG - Private Search Engine
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./searxng:/etc/searxng
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8081
+
+  # ===================
+  # REMOTE ACCESS
+  # ===================
+
+  # Twingate Connector (for remote access)
+  twingate-connector:
+    image: twingate/connector:latest
+    container_name: twingate-connector
+    restart: always
+    environment:
+      - TWINGATE_URL=${TWINGATE_URL}
+      - TWINGATE_ACCESS_TOKEN=${TWINGATE_ACCESS_TOKEN}
+      - TWINGATE_REFRESH_TOKEN=${TWINGATE_REFRESH_TOKEN}
+    sysctls:
+      - net.ipv4.ping_group_range=0 2147483647
+    healthcheck:
+      test: ["CMD", "/connectorctl", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===================
+  # MEDIA (OPTIONAL)
+  # ===================
+
+  # Jellyfin - Media Server
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    restart: unless-stopped
+    ports:
+      - "8096:8096"
+    volumes:
+      - ./jellyfin/config:/config
+      - ./jellyfin/cache:/cache
+      - /path/to/media:/media:ro
+    environment:
+      - JELLYFIN_PublishedServerUrl=http://localhost:8096
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8096/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ===================
+  # DASHBOARD
+  # ===================
+
+  # Glance - Simple Dashboard
+  glance:
+    image: glanceapp/glance:latest
+    container_name: glance
+    restart: unless-stopped
+    ports:
+      - "8280:8080"
+    volumes:
+      - ./glance/glance.yml:/app/glance.yml
+
+# Networks
+networks:
+  default:
+    name: benchai-network

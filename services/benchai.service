@@ -1,0 +1,27 @@
+[Unit]
+Description=BenchAI LLM Router - Intelligent Engineering Assistant
+After=network.target docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+User=user
+Group=user
+WorkingDirectory=/home/user/llama.cpp/router
+Environment="PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="HOME=/home/user"
+ExecStart=/usr/bin/python3 /home/user/llama.cpp/router/llm_router.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=append:/var/log/benchai-router.log
+StandardError=append:/var/log/benchai-router.log
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/user/llm-storage /home/user/llama.cpp/router /tmp
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
