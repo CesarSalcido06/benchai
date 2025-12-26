@@ -42,14 +42,14 @@ mkdir -p ~/llm-storage/{memory,rag,cache}
 
 ### Error: "Address already in use" on port 8085
 
-**Symptom:** Service repeatedly restarts with port binding error.
+**Symptom:** Service repeatedly restarts with port binding error, high restart count.
 
-**Solution:**
+**Cause:** Orphan process from previous instance still holding the port.
+
+**Quick Fix:**
 ```bash
-# Find process using the port
+# Find and kill process using the port
 sudo lsof -i :8085
-
-# Kill it
 sudo kill -9 <PID>
 
 # Or kill all BenchAI processes
@@ -59,6 +59,17 @@ pkill -9 -f llama-server
 # Restart service
 sudo systemctl restart benchai
 ```
+
+**Permanent Fix:** Update your service file to include cleanup hooks:
+```bash
+# Get the latest service file
+cd ~/benchai && git pull
+sudo cp services/benchai.service /etc/systemd/system/benchai.service
+sudo systemctl daemon-reload
+sudo systemctl restart benchai
+```
+
+The updated service file includes `ExecStartPre` and `ExecStopPost` hooks that automatically clean up orphan processes.
 
 ### Error: Permission denied
 
