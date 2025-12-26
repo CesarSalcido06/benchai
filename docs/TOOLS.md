@@ -36,14 +36,14 @@ Get logs from a container.
 
 **Trigger:** "logs", "container logs"
 
-**Example:** "get jellyfin logs"
+**Example:** "get nginx logs"
 
 ### docker_control
 Start, stop, restart containers.
 
 **Trigger:** "restart", "stop", "start"
 
-**Example:** "restart sonarr"
+**Example:** "restart postgres"
 
 ### docker_stats
 Get container resource usage.

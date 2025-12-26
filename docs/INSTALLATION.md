@@ -191,13 +191,15 @@ curl http://localhost:8085/v1/memory/stats
 curl http://localhost:8085/v1/rag/stats
 ```
 
-## Step 11: Configure Open WebUI
+## Step 11: Optional Web Interface
 
-1. Open http://localhost:3000
-2. Go to Settings → Connections
-3. Add OpenAI-compatible endpoint:
-   - URL: `http://host.docker.internal:8085/v1`
-   - API Key: `not-needed`
+If using Open WebUI or another web interface:
+
+1. Point it to: `http://localhost:8085/v1`
+2. Use API Key: `not-needed` (any value works)
+3. Select model: `auto` for routing
+
+**Recommended:** Install [benchai-client](../benchai-client) for CLI, VS Code, and Neovim instead.
 
 ## Post-Installation
 
@@ -215,12 +217,14 @@ curl -X POST http://localhost:8085/v1/rag/index \
 curl -X POST http://localhost:8085/v1/memory/optimize
 ```
 
-### Set Up Twingate (Remote Access)
+### Set Up Remote Access (Optional)
 
-1. Install Twingate connector via Docker (see docker-compose)
-2. Add resources in Twingate admin portal:
-   - BenchAI: `your-server-ip:8085`
-   - Open WebUI: `your-server-ip:3000`
+For remote access, configure:
+- VPN (Tailscale, WireGuard, etc.)
+- Reverse proxy with SSL (Nginx, Caddy)
+- Port forwarding (less secure)
+
+**BenchAI Endpoint:** `your-server-ip:8085`
 
 ## Troubleshooting
 

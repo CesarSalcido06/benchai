@@ -4,26 +4,28 @@ How to use BenchAI for daily development tasks.
 
 ## Access Methods
 
-| Method | URL/Command | Best For |
-|--------|-------------|----------|
-| Open WebUI | http://localhost:3000 | Full chat interface |
+| Method | Command | Best For |
+|--------|---------|----------|
 | CLI | `benchai "your query"` | Quick terminal queries |
+| VS Code | `Cmd/Ctrl+L` | In-editor assistance |
+| Neovim | `<leader>aa` | Vim workflow |
 | API | `curl localhost:8085/v1/...` | Scripting, automation |
-| VS Code | Cmd/Ctrl+L | In-editor assistance |
-| Neovim | `<leader>aa` | Vim users |
+| Web UI | Any OpenAI-compatible UI | Optional chat interface |
+
+**Recommended:** Install [benchai-client](../benchai-client) for best experience.
 
 ---
 
 ## Basic Usage
 
-### Open WebUI
+### CLI Examples
 
-Simply chat naturally:
+Natural language queries:
 
 ```
-"what containers are running?"          → Lists Docker containers
-"check homelab status"                   → System health report
-"search the web for Python tutorials"    → Web search via SearXNG
+"what containers are running?"           → Lists Docker containers
+"check system status"                    → System health report
+"search the web for Python tutorials"    → Web search
 "remember that I prefer dark mode"       → Saves to memory
 "what do you remember about me?"         → Recalls memories
 ```
@@ -60,7 +62,7 @@ curl -X POST http://localhost:8085/v1/chat/completions \
 
 **Morning Check:**
 ```
-"check homelab status"
+"check system status"
 "are all services healthy?"
 "show docker container stats"
 ```
@@ -114,8 +116,8 @@ curl -X POST http://localhost:8085/v1/chat/completions \
 **Container Management:**
 ```
 "list all containers"
-"get jellyfin logs"
-"restart sonarr"
+"get nginx logs"
+"restart postgres"
 "show docker stats"
 ```
 
@@ -136,9 +138,9 @@ curl -X POST http://localhost:8085/v1/chat/completions \
 | Pattern | Tool | Example |
 |---------|------|---------|
 | "containers", "docker" | docker_ps | "what containers are running?" |
-| "container logs" | docker_logs | "get jellyfin logs" |
-| "restart/stop" | docker_control | "restart sonarr" |
-| "homelab status" | homelab_status | "check homelab status" |
+| "container logs" | docker_logs | "get nginx logs" |
+| "restart/stop" | docker_control | "restart postgres" |
+| "system status" | system_status | "check system status" |
 
 ### Development
 | Pattern | Tool | Example |
