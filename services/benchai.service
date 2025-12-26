@@ -11,6 +11,9 @@ WorkingDirectory=/home/user/llama.cpp/router
 Environment="PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="HOME=/home/user"
 
+# Kill any process using port 8085 before starting
+ExecStartPre=/bin/bash -c 'fuser -k 8085/tcp 2>/dev/null || true'
+ExecStartPre=/bin/sleep 2
 ExecStart=/usr/bin/python3 /home/user/llama.cpp/router/llm_router.py
 Restart=on-failure
 RestartSec=10
