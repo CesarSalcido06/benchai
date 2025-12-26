@@ -26,17 +26,17 @@ The router code has internal cleanup (`[CLEANUP] Found 1 orphaned llama-server p
 - May confuse monitoring systems
 
 ### Fix Applied
-Updated `services/benchai.service` to add pre-start and post-stop cleanup:
+Updated `services/benchai.service` with proper process management:
 
 ```ini
-# Kill any orphan processes before starting
-ExecStartPre=/bin/bash -c 'pkill -9 -f "llm_router.py" 2>/dev/null || true'
-ExecStartPre=/bin/bash -c 'sleep 1'
-
-# Cleanup after stop
-ExecStopPost=/bin/bash -c 'pkill -9 -f "llm_router.py" 2>/dev/null || true'
-ExecStopPost=/bin/bash -c 'pkill -9 -f "llama-server" 2>/dev/null || true'
+ExecStart=/usr/bin/python3 /home/user/llama.cpp/router/llm_router.py
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=5
+KillMode=mixed
 ```
+
+**Note:** Initial attempt with `ExecStartPre` hooks using `pkill -f` failed because pkill was matching and killing itself. The simpler solution uses `KillMode=mixed` which properly terminates child processes on stop.
 
 ### How to Apply Fix
 ```bash
