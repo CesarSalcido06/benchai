@@ -215,9 +215,19 @@ CLAUDE_ESCALATION_TRIGGERS = [
 IDLE_TIMEOUT = 600  # 10 minutes
 
 # --- GPU CONFIGURATION ---
-GPU_VRAM_THRESHOLD = 6000  # Minimum free VRAM (MiB) needed for GPU mode
-CPU_MODELS = ["planner"]   # Models that always run on CPU for speed/availability
-GPU_ONLY_MODELS = ["vision"]  # Models that require GPU (can't run on CPU)
+# RTX 3060 has 12GB VRAM - optimize allocation:
+# - DeepSeek Coder: GPU (primary coding model, ~4GB)
+# - Phi-3 Mini: CPU (fast, small, always available)
+# - Qwen2.5: CPU (planner needs to always be available)
+# - Vision: On-demand GPU (swap when needed)
+GPU_VRAM_THRESHOLD = 4000  # Minimum free VRAM (MiB) needed for GPU mode
+CPU_MODELS = ["planner", "general", "research"]  # Models that always run on CPU for availability
+GPU_PREFERRED = ["code"]  # Models that prefer GPU when available
+GPU_ONLY_MODELS = ["vision"]  # Models that require GPU (can't run on CPU effectively)
+
+# Core models that should always be running
+CORE_MODELS = ["general", "planner", "code"]  # Essential models to start on boot
+HEALTH_CHECK_INTERVAL = 60  # Seconds between health checks
 
 def check_gpu_available(min_free_mb: int = GPU_VRAM_THRESHOLD) -> tuple[bool, int, int]:
     """
@@ -965,6 +975,7 @@ class ModelManager:
         self.last_used: Dict[str, float] = {}
         self.comfy_process: Optional[subprocess.Popen] = None
         self._cleanup_task: Optional[asyncio.Task] = None
+        self._health_monitor_task: Optional[asyncio.Task] = None
         self._model_lock = asyncio.Lock()  # Prevent race conditions
         self._current_operation: Optional[str] = None  # Track what's happening
         # Kill orphaned llama-server processes on startup
@@ -1000,11 +1011,99 @@ class ModelManager:
         to_unload = []
         for model_type, last_time in self.last_used.items():
             if current_time - last_time > IDLE_TIMEOUT:
+                # Never unload core models
+                if model_type in CORE_MODELS:
+                    continue
                 if model_type in self.processes:
                     to_unload.append(model_type)
         for model_type in to_unload:
             print(f"[CLEANUP] Auto-unloading idle model: {model_type}")
             await self.stop_model(model_type)
+
+    async def ensure_core_models(self):
+        """
+        Ensure all core models are running on startup.
+        This prevents the 'empty response from model' error.
+        """
+        print("[STARTUP] Ensuring core models are running...")
+
+        for model_type in CORE_MODELS:
+            if model_type not in MODELS:
+                print(f"[WARN] Core model '{model_type}' not in MODELS config")
+                continue
+
+            config = MODELS[model_type]
+            port = config["port"]
+
+            # Check if model is already running
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"http://127.0.0.1:{port}/health", timeout=2.0)
+                    if resp.status_code == 200:
+                        print(f"[STARTUP] {model_type} already running on port {port}")
+                        self.last_used[model_type] = time.time()
+                        continue
+            except:
+                pass
+
+            # Start the model
+            print(f"[STARTUP] Starting core model: {model_type}")
+            success = await self.start_model(model_type)
+            if success:
+                print(f"[STARTUP] {model_type} started successfully")
+            else:
+                print(f"[ERROR] Failed to start core model: {model_type}")
+
+        print("[STARTUP] Core models check complete")
+
+    async def health_monitor_loop(self):
+        """
+        Background task to monitor model health and restart crashed models.
+        Runs every HEALTH_CHECK_INTERVAL seconds.
+        """
+        while True:
+            await asyncio.sleep(HEALTH_CHECK_INTERVAL)
+            await self._check_and_restart_models()
+
+    async def _check_and_restart_models(self):
+        """Check health of core models and restart any that have crashed."""
+        for model_type in CORE_MODELS:
+            if model_type not in MODELS:
+                continue
+
+            config = MODELS[model_type]
+            port = config["port"]
+
+            # Check if model responds to health check
+            is_healthy = False
+            try:
+                async with httpx.AsyncClient() as client:
+                    resp = await client.get(f"http://127.0.0.1:{port}/health", timeout=3.0)
+                    is_healthy = resp.status_code == 200
+            except:
+                pass
+
+            if not is_healthy:
+                # Check if process is still running but not responding
+                if model_type in self.processes:
+                    proc = self.processes[model_type]
+                    if proc.poll() is not None:
+                        print(f"[HEALTH] {model_type} process died (exit code: {proc.returncode})")
+                        del self.processes[model_type]
+                    else:
+                        print(f"[HEALTH] {model_type} not responding but process alive - killing")
+                        await self.stop_model(model_type)
+
+                # Restart the model
+                print(f"[HEALTH] Restarting {model_type}...")
+                success = await self.start_model(model_type)
+                if success:
+                    print(f"[HEALTH] {model_type} restarted successfully")
+                else:
+                    print(f"[ERROR] Failed to restart {model_type}")
+            else:
+                # Update last used time for healthy models
+                self.last_used[model_type] = time.time()
 
     def is_running(self, model_type: str) -> bool:
         if model_type not in self.processes:
@@ -1094,29 +1193,48 @@ class ModelManager:
             return True
 
         # Determine if we should use GPU or CPU
-        use_gpu = True
+        # Strategy for RTX 3060 (12GB):
+        # - CPU_MODELS: Always CPU (general, planner, research) - ensures availability
+        # - GPU_PREFERRED: Use GPU if available (code) - best performance
+        # - GPU_ONLY: Must have GPU (vision) - may need to free VRAM
+        use_gpu = False
         gpu_available, gpu_used, gpu_total = check_gpu_available()
         gpu_free = gpu_total - gpu_used if gpu_total > 0 else 0
 
-        # Planner always uses CPU for quick availability (doesn't depend on GPU)
         if model_type in CPU_MODELS:
+            # Always run on CPU for guaranteed availability
             use_gpu = False
-            print(f"[MODEL] {model_type} configured for CPU mode (always available)")
+            print(f"[MODEL] {model_type} → CPU mode (always available)")
         elif model_type in GPU_ONLY_MODELS:
-            # Vision and other GPU-only models must use GPU
+            # Must use GPU - may need to free VRAM from other GPU models
             if not gpu_available:
-                print(f"[GPU] {model_type} requires GPU but only {gpu_free} MiB free (need {GPU_VRAM_THRESHOLD} MiB)")
-                return False
+                # Try to free GPU memory by stopping GPU_PREFERRED models
+                print(f"[GPU] {model_type} requires GPU, freeing VRAM...")
+                for other_model in list(self.processes.keys()):
+                    if other_model in GPU_PREFERRED and self.is_running(other_model):
+                        print(f"[GPU] Stopping {other_model} to free VRAM")
+                        await self._stop_model_internal(other_model)
+                await asyncio.sleep(3)
+                # Check again
+                gpu_available, gpu_used, gpu_total = check_gpu_available()
+                gpu_free = gpu_total - gpu_used if gpu_total > 0 else 0
+                if not gpu_available:
+                    print(f"[ERROR] {model_type} requires GPU but only {gpu_free} MiB free")
+                    return False
             use_gpu = True
-        elif not gpu_available:
-            use_gpu = False
-            print(f"[GPU] Only {gpu_free} MiB free (need {GPU_VRAM_THRESHOLD} MiB) - using CPU fallback")
+            print(f"[MODEL] {model_type} → GPU mode (required)")
+        elif model_type in GPU_PREFERRED:
+            # Prefer GPU but can fall back to CPU
+            if gpu_available:
+                use_gpu = True
+                print(f"[MODEL] {model_type} → GPU mode (preferred, {gpu_free} MiB free)")
+            else:
+                use_gpu = False
+                print(f"[MODEL] {model_type} → CPU fallback ({gpu_free} MiB free, need {GPU_VRAM_THRESHOLD})")
         else:
-            # GPU available - stop other models to free VRAM
-            print(f"[MODEL] GPU available ({gpu_total - gpu_used} MiB free) - using GPU mode")
-            print(f"[MODEL] Stopping all models before starting {model_type}...")
-            await self._stop_all_internal()  # Use internal version (already locked)
-            await asyncio.sleep(3)  # Allow VRAM to fully release
+            # Default: use CPU for stability
+            use_gpu = False
+            print(f"[MODEL] {model_type} → CPU mode (default)")
 
         # Log current GPU state
         print(f"[GPU] Memory: {gpu_used}, {gpu_total} MiB | Mode: {'GPU' if use_gpu else 'CPU'}")
@@ -4557,14 +4675,28 @@ async def lifespan(app: FastAPI):
     # Initialize managers
     await memory_manager.initialize()
     await rag_manager.initialize()
+
+    # Start background tasks
     manager._cleanup_task = asyncio.create_task(manager.start_cleanup_loop())
+    manager._health_monitor_task = asyncio.create_task(manager.health_monitor_loop())
+
+    # Ensure core models are running (prevents empty response errors)
+    print("[BENCHAI] Starting core models...")
+    await manager.ensure_core_models()
+
     print("[BENCHAI] Router v3 started on port 8085")
     print(f"[BENCHAI] Memory: {DB_PATH}")
     print(f"[BENCHAI] RAG: {rag_manager.get_stats()}")
     print(f"[BENCHAI] TTS: {'Available' if PIPER_AVAILABLE else 'Not available'}")
+    print(f"[BENCHAI] Core models: {CORE_MODELS}")
+    print(f"[BENCHAI] Health check interval: {HEALTH_CHECK_INTERVAL}s")
     yield
+
+    # Cleanup on shutdown
     if manager._cleanup_task:
         manager._cleanup_task.cancel()
+    if manager._health_monitor_task:
+        manager._health_monitor_task.cancel()
     await manager.stop_all()
     print("[BENCHAI] Router stopped")
 
