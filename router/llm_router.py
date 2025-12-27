@@ -66,6 +66,14 @@ except ImportError as e:
     LEARNING_AVAILABLE = False
     print(f"[WARN] Learning system not available - {e}")
 
+# OpenTelemetry Monitoring
+try:
+    from learning.telemetry import init_telemetry, get_telemetry, traced
+    TELEMETRY_AVAILABLE = True
+except ImportError as e:
+    TELEMETRY_AVAILABLE = False
+    print(f"[WARN] Telemetry not available - {e}")
+
 # Load environment variables from .env file
 def load_env():
     env_file = Path(__file__).parent / ".env"
@@ -4869,6 +4877,18 @@ async def lifespan(app: FastAPI):
             print("[BENCHAI] Learning system initialized (Zettelkasten, Memory, Experience, Training)")
         except Exception as e:
             print(f"[WARN] Learning system initialization failed: {e}")
+
+    # Initialize OpenTelemetry monitoring
+    if TELEMETRY_AVAILABLE:
+        try:
+            telemetry = init_telemetry(
+                service_name="benchai",
+                otlp_endpoint=os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT"),
+                enable_console=False  # Set True for debugging
+            )
+            print("[BENCHAI] OpenTelemetry monitoring initialized")
+        except Exception as e:
+            print(f"[WARN] Telemetry initialization failed: {e}")
 
     # Start background tasks
     manager._cleanup_task = asyncio.create_task(manager.start_cleanup_loop())

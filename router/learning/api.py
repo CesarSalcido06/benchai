@@ -16,6 +16,13 @@ from .experience_replay import TaskDomain, ExperienceOutcome
 from .interaction_logger import InteractionType
 from .learning_pipeline import AdapterType
 
+# OpenTelemetry integration
+try:
+    from .telemetry import get_telemetry
+    TELEMETRY_AVAILABLE = True
+except ImportError:
+    TELEMETRY_AVAILABLE = False
+
 # Create the router
 router = APIRouter(prefix="/v1/learning", tags=["learning"])
 
@@ -594,6 +601,43 @@ async def run_maintenance(background_tasks: BackgroundTasks):
     return {"status": "started", "message": "Maintenance tasks running in background"}
 
 
+@router.get("/telemetry")
+async def get_telemetry_info():
+    """
+    Get OpenTelemetry monitoring status and info.
+
+    Returns trace context and monitoring configuration.
+    """
+    if not TELEMETRY_AVAILABLE:
+        return {
+            "status": "disabled",
+            "message": "OpenTelemetry not available"
+        }
+
+    telemetry = get_telemetry()
+    trace_id = telemetry.get_current_trace_id()
+
+    return {
+        "status": "enabled",
+        "service_name": telemetry.service_name,
+        "trace_id": trace_id,
+        "otlp_endpoint": telemetry.otlp_endpoint,
+        "metrics": {
+            "requests": "benchai.requests.total",
+            "duration": "benchai.requests.duration",
+            "errors": "benchai.errors.total",
+            "agent_tasks": "benchai.agent.tasks.total",
+            "routing_confidence": "benchai.routing.confidence",
+            "memory_ops": "benchai.memory.operations",
+            "experiences": "benchai.experience.recorded"
+        },
+        "tracing": {
+            "propagation": "W3C TraceContext",
+            "sampling": "always_on"
+        }
+    }
+
+
 # =========================================================================
 # Zettelkasten Knowledge Graph Endpoints
 # =========================================================================
@@ -819,6 +863,7 @@ async def submit_a2a_task(request: A2ATaskRequest, background_tasks: BackgroundT
     - Set to_agent="auto" to use semantic routing
     - Automatically routes based on task content and agent capabilities
     - Considers agent availability and load
+    - OpenTelemetry tracing for distributed monitoring
     """
     import uuid
     from .semantic_router import route_task, RouteResult
@@ -829,6 +874,15 @@ async def submit_a2a_task(request: A2ATaskRequest, background_tasks: BackgroundT
     task_id = f"a2a-{uuid.uuid4().hex[:12]}"
     target_agent = request.to_agent
     routing_info = None
+
+    # === TELEMETRY: Start tracing ===
+    telemetry = get_telemetry() if TELEMETRY_AVAILABLE else None
+    if telemetry:
+        telemetry.agent_task_counter.add(1, {
+            "from_agent": request.from_agent,
+            "task_type": request.task_type,
+            "routing": "auto" if request.to_agent.lower() == "auto" else "direct"
+        })
 
     # === SEMANTIC ROUTING ===
     # If to_agent is "auto", use semantic router to determine best agent
@@ -851,6 +905,13 @@ async def submit_a2a_task(request: A2ATaskRequest, background_tasks: BackgroundT
             "matched_capabilities": route_result.matched_capabilities,
             "reasoning": route_result.reasoning
         }
+
+        # Record routing confidence metric
+        if telemetry:
+            telemetry.routing_confidence.record(
+                route_result.confidence,
+                {"agent": target_agent, "domain": route_result.domain.value}
+            )
 
     # Store task in memory for tracking
     task_metadata = {
