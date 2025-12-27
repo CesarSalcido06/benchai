@@ -1557,3 +1557,168 @@ async def get_agent_learning_stats(agent_id: str):
         }
 
     return stats
+
+
+# =========================================================================
+# Agent Sync Endpoints (Bidirectional Memory Sync)
+# =========================================================================
+
+class SyncRequest(BaseModel):
+    """Request for sync data from another agent."""
+    from_agent: str
+    sync_type: str = "experience"  # experience, knowledge, pattern
+    items: List[Dict[str, Any]]
+    timestamp: Optional[str] = None
+
+
+@router.post("/sync/receive")
+async def receive_sync_data(request: SyncRequest):
+    """
+    Receive sync data from another agent.
+
+    This endpoint is called by remote agents to push their
+    experiences and knowledge to BenchAI.
+    """
+    items_processed = 0
+
+    for item in request.items:
+        try:
+            if request.sync_type == "experience":
+                # Store in memory
+                await system.memory.store(
+                    content=item.get("content", ""),
+                    memory_type="episodic",
+                    category="agent_sync",
+                    importance=item.get("importance", 3),
+                    source=request.from_agent,
+                    metadata={
+                        "synced_from": request.from_agent,
+                        "sync_type": request.sync_type,
+                        "original_id": item.get("id")
+                    }
+                )
+            elif request.sync_type == "knowledge":
+                # Store in Zettelkasten
+                await system.zettelkasten.create_note(
+                    title=item.get("title", f"Synced from {request.from_agent}"),
+                    content=item.get("content", ""),
+                    tags=item.get("tags", []) + [f"synced:{request.from_agent}"],
+                    source=request.from_agent
+                )
+            items_processed += 1
+        except Exception:
+            continue
+
+    return {
+        "status": "ok",
+        "from_agent": request.from_agent,
+        "items_processed": items_processed,
+        "sync_type": request.sync_type
+    }
+
+
+@router.get("/sync/share")
+async def share_sync_data(
+    requester: str = Query(..., description="Requesting agent ID"),
+    sync_type: str = Query("experience", description="Type of data to share"),
+    since: Optional[str] = Query(None, description="ISO timestamp"),
+    limit: int = Query(50, ge=1, le=200)
+):
+    """
+    Share sync data with another agent.
+
+    This endpoint is called by remote agents to pull BenchAI's
+    experiences and knowledge.
+    """
+    items = []
+
+    try:
+        if sync_type == "experience":
+            # Get recent high-quality experiences
+            memories = await system.memory.search(
+                query=requester,
+                limit=limit,
+                min_importance=3
+            )
+            items = [
+                {
+                    "id": m.get("id"),
+                    "content": m.get("content"),
+                    "importance": m.get("importance", 3),
+                    "category": m.get("category"),
+                    "created_at": m.get("created_at")
+                }
+                for m in memories
+            ]
+        elif sync_type == "knowledge":
+            # Get relevant Zettelkasten notes
+            notes = await system.zettelkasten.search(
+                query=requester,
+                limit=limit
+            )
+            items = [
+                {
+                    "id": n.get("id"),
+                    "title": n.get("title"),
+                    "content": n.get("content"),
+                    "tags": n.get("tags", [])
+                }
+                for n in notes
+            ]
+    except Exception:
+        pass
+
+    return {
+        "status": "ok",
+        "for_agent": requester,
+        "sync_type": sync_type,
+        "items": items,
+        "count": len(items)
+    }
+
+
+@router.post("/sync/trigger/{agent_id}")
+async def trigger_sync(
+    agent_id: str,
+    sync_types: Optional[str] = Query("experience,knowledge", description="Comma-separated sync types")
+):
+    """
+    Trigger bidirectional sync with an agent.
+
+    Initiates push and pull of experiences and knowledge
+    with the specified agent.
+    """
+    from .agent_sync import get_sync_manager
+
+    sync_manager = get_sync_manager(system.memory, system.zettelkasten)
+    if not sync_manager:
+        return {"status": "error", "message": "Sync manager not initialized"}
+
+    types = sync_types.split(",") if sync_types else ["experience", "knowledge"]
+    results = await sync_manager.bidirectional_sync(agent_id, types)
+
+    return {
+        "status": "ok",
+        "agent_id": agent_id,
+        "results": {
+            k: {
+                "success": v.success,
+                "items_sent": v.items_sent,
+                "items_received": v.items_received,
+                "error": v.error
+            }
+            for k, v in results.items()
+        }
+    }
+
+
+@router.get("/sync/stats")
+async def get_sync_stats():
+    """Get sync operation statistics."""
+    from .agent_sync import get_sync_manager
+
+    sync_manager = get_sync_manager()
+    if not sync_manager:
+        return {"status": "not_initialized", "message": "Sync manager not initialized"}
+
+    return sync_manager.get_sync_stats()
