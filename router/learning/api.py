@@ -579,6 +579,39 @@ async def search_zettelkasten(
     return {"results": results, "count": len(results)}
 
 
+@router.get("/zettelkasten/hubs")
+async def get_hub_notes(limit: int = Query(10, ge=1, le=50)):
+    """Find hub notes (highly connected entry points)."""
+    system = get_learning_system()
+    await system.initialize()
+
+    hubs = await system.zettelkasten.find_hubs(limit=limit)
+    return {"hubs": hubs, "count": len(hubs)}
+
+
+@router.get("/zettelkasten/stats")
+async def zettelkasten_stats():
+    """Get Zettelkasten statistics."""
+    system = get_learning_system()
+    await system.initialize()
+
+    return await system.zettelkasten.get_stats()
+
+
+@router.post("/zettelkasten/consolidate")
+async def consolidate_zettelkasten(background_tasks: BackgroundTasks):
+    """Trigger sleep consolidation (strengthen/weaken links, compress notes)."""
+    system = get_learning_system()
+    await system.initialize()
+
+    async def run_consolidation():
+        return await system.zettelkasten.sleep_consolidation()
+
+    background_tasks.add_task(run_consolidation)
+    return {"status": "started", "message": "Sleep consolidation running in background"}
+
+
+# NOTE: Parametrized routes must come AFTER specific routes
 @router.get("/zettelkasten/{zettel_id}")
 async def get_zettel(zettel_id: str):
     """Get a specific Zettel by ID."""
@@ -600,38 +633,6 @@ async def get_connected_knowledge(zettel_id: str, depth: int = Query(2, ge=1, le
 
     graph = await system.zettelkasten.get_connected_knowledge(zettel_id, max_depth=depth)
     return graph
-
-
-@router.get("/zettelkasten/hubs")
-async def get_hub_notes(limit: int = Query(10, ge=1, le=50)):
-    """Find hub notes (highly connected entry points)."""
-    system = get_learning_system()
-    await system.initialize()
-
-    hubs = await system.zettelkasten.find_hubs(limit=limit)
-    return {"hubs": hubs, "count": len(hubs)}
-
-
-@router.post("/zettelkasten/consolidate")
-async def consolidate_zettelkasten(background_tasks: BackgroundTasks):
-    """Trigger sleep consolidation (strengthen/weaken links, compress notes)."""
-    system = get_learning_system()
-    await system.initialize()
-
-    async def run_consolidation():
-        return await system.zettelkasten.sleep_consolidation()
-
-    background_tasks.add_task(run_consolidation)
-    return {"status": "started", "message": "Sleep consolidation running in background"}
-
-
-@router.get("/zettelkasten/stats")
-async def zettelkasten_stats():
-    """Get Zettelkasten statistics."""
-    system = get_learning_system()
-    await system.initialize()
-
-    return await system.zettelkasten.get_stats()
 
 
 # =========================================================================
@@ -735,9 +736,9 @@ async def submit_a2a_task(request: A2ATaskRequest, background_tasks: BackgroundT
     task_id = f"a2a-{uuid.uuid4().hex[:12]}"
 
     # Store task in memory for tracking
-    await system.memory.add(
+    await system.memory.store(
         content=f"A2A Task from {request.from_agent} to {request.to_agent}: {request.task_description}",
-        memory_type="agent",
+        memory_type=MemoryType.AGENT_CONTEXT,
         category="a2a_task",
         importance=4,
         source=request.from_agent,
@@ -786,10 +787,10 @@ async def agent_heartbeat(request: A2AHeartbeat):
     # Update agent status
     await system.update_agent_status(request.agent_id, request.status)
 
-    # Store heartbeat data
-    await system.memory.add(
+    # Store heartbeat data (low importance, will decay quickly)
+    await system.memory.store(
         content=f"Heartbeat from {request.agent_id}: {request.status}, load: {request.load}",
-        memory_type="agent",
+        memory_type=MemoryType.AGENT_CONTEXT,
         category="heartbeat",
         importance=1,
         source=request.agent_id,
