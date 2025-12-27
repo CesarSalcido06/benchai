@@ -68,12 +68,32 @@ class ExperienceRecordRequest(BaseModel):
     agent: str = "benchai"
 
 
+class AgentSkill(BaseModel):
+    """A2A v0.3 Skill definition."""
+    id: str
+    name: str
+    description: Optional[str] = None
+    tags: List[str] = []
+    input_modes: List[str] = ["text/plain"]
+    output_modes: List[str] = ["application/json"]
+    examples: List[str] = []
+
+
 class AgentRegisterRequest(BaseModel):
+    """A2A v0.3 Agent Card registration."""
     agent_id: str
     name: str
     role: str
     capabilities: List[str]
     endpoint: Optional[str] = None
+    # A2A v0.3 extended fields
+    description: Optional[str] = None
+    version: Optional[str] = "1.0.0"
+    skills: Optional[List[AgentSkill]] = None
+    default_input_modes: List[str] = ["text/plain", "application/json"]
+    default_output_modes: List[str] = ["text/plain", "application/json"]
+    authentication: Optional[Dict[str, Any]] = None
+    provider: Optional[Dict[str, str]] = None
 
 
 class AgentStatusRequest(BaseModel):
@@ -295,19 +315,86 @@ async def get_experience_stats():
 
 @router.post("/agents/register")
 async def register_agent(request: AgentRegisterRequest):
-    """Register an agent in the multi-agent system."""
+    """
+    Register an agent with A2A v0.3 Agent Card.
+
+    The Agent Card contains capabilities, skills, and metadata that other
+    agents can use to discover and collaborate with this agent.
+    """
     system = get_learning_system()
     await system.initialize()
+
+    # Build full A2A v0.3 Agent Card for storage
+    agent_card = {
+        "name": request.name,
+        "id": request.agent_id,
+        "description": request.description or f"{request.role.capitalize()} agent",
+        "url": request.endpoint,
+        "version": request.version,
+        "protocol_version": "0.3",
+        "role": request.role,
+        "capabilities": request.capabilities,
+        "skills": [s.dict() for s in request.skills] if request.skills else [],
+        "default_input_modes": request.default_input_modes,
+        "default_output_modes": request.default_output_modes,
+        "authentication": request.authentication,
+        "provider": request.provider,
+        "registered_at": datetime.now().isoformat()
+    }
 
     await system.register_agent(
         agent_id=request.agent_id,
         name=request.name,
         role=request.role,
         capabilities=request.capabilities,
-        endpoint=request.endpoint
+        endpoint=request.endpoint,
+        agent_card=agent_card
     )
 
-    return {"status": "ok", "agent_id": request.agent_id}
+    return {
+        "status": "ok",
+        "agent_id": request.agent_id,
+        "agent_card_url": f"http://localhost:8085/v1/learning/agents/{request.agent_id}/card",
+        "protocol_version": "A2A v0.3"
+    }
+
+
+@router.get("/agents/{agent_id}/card")
+async def get_agent_card(agent_id: str):
+    """
+    Get an agent's A2A v0.3 Agent Card.
+
+    Returns the full Agent Card including capabilities, skills, and metadata.
+    """
+    system = get_learning_system()
+    await system.initialize()
+
+    agents = await system.get_agents()
+    agent = next((a for a in agents if a.get("id") == agent_id), None)
+
+    if not agent:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+
+    # Build Agent Card from stored data
+    metadata = agent.get("metadata", {})
+    card = {
+        "name": agent.get("name", agent_id),
+        "id": agent_id,
+        "description": metadata.get("description", f"{agent.get('role', 'agent').capitalize()} agent"),
+        "url": agent.get("endpoint", ""),
+        "version": metadata.get("version", "1.0.0"),
+        "protocol_version": "0.3",
+        "status": agent.get("status", "offline"),
+        "role": agent.get("role", "agent"),
+        "capabilities": agent.get("capabilities", []),
+        "skills": metadata.get("skills", []),
+        "default_input_modes": metadata.get("default_input_modes", ["text/plain", "application/json"]),
+        "default_output_modes": metadata.get("default_output_modes", ["text/plain", "application/json"]),
+        "last_seen": agent.get("last_seen"),
+        "registered_at": metadata.get("registered_at")
+    }
+
+    return card
 
 
 @router.get("/agents")
@@ -727,32 +814,67 @@ class A2AHeartbeat(BaseModel):
 async def submit_a2a_task(request: A2ATaskRequest, background_tasks: BackgroundTasks):
     """
     Submit a task from one agent to another.
-    Used for cross-agent collaboration (e.g., MarunochiAI asks BenchAI for research).
+
+    Features:
+    - Set to_agent="auto" to use semantic routing
+    - Automatically routes based on task content and agent capabilities
+    - Considers agent availability and load
     """
     import uuid
+    from .semantic_router import route_task, RouteResult
+
     system = get_learning_system()
     await system.initialize()
 
     task_id = f"a2a-{uuid.uuid4().hex[:12]}"
+    target_agent = request.to_agent
+    routing_info = None
+
+    # === SEMANTIC ROUTING ===
+    # If to_agent is "auto", use semantic router to determine best agent
+    if target_agent.lower() == "auto":
+        # Get current agent status for load-aware routing
+        available_agents = await system.get_agents()
+
+        # Route the task
+        route_result = route_task(
+            task_description=request.task_description,
+            available_agents=available_agents,
+            prefer_agent=None
+        )
+
+        target_agent = route_result.target_agent
+        routing_info = {
+            "routed": True,
+            "confidence": route_result.confidence,
+            "domain": route_result.domain.value,
+            "matched_capabilities": route_result.matched_capabilities,
+            "reasoning": route_result.reasoning
+        }
 
     # Store task in memory for tracking
+    task_metadata = {
+        "task_id": task_id,
+        "to_agent": target_agent,
+        "original_to_agent": request.to_agent,
+        "task_type": request.task_type,
+        "priority": request.priority,
+        "callback_url": request.callback_url
+    }
+    if routing_info:
+        task_metadata["routing"] = routing_info
+
     await system.memory.store(
-        content=f"A2A Task from {request.from_agent} to {request.to_agent}: {request.task_description}",
+        content=f"A2A Task from {request.from_agent} to {target_agent}: {request.task_description}",
         memory_type=MemoryType.AGENT_CONTEXT,
         category="a2a_task",
         importance=4,
         source=request.from_agent,
-        metadata={
-            "task_id": task_id,
-            "to_agent": request.to_agent,
-            "task_type": request.task_type,
-            "priority": request.priority,
-            "callback_url": request.callback_url
-        }
+        metadata=task_metadata
     )
 
     # If task is for BenchAI (research), process it
-    if request.to_agent.lower() == "benchai" and request.task_type == "research":
+    if target_agent.lower() == "benchai" and request.task_type == "research":
         query_id = await system.research_api.submit_query(
             query=request.task_description,
             agent_id=request.from_agent,
@@ -761,17 +883,77 @@ async def submit_a2a_task(request: A2ATaskRequest, background_tasks: BackgroundT
             graph_depth=3,
             max_results=15
         )
-        return {
+        response = {
             "task_id": task_id,
+            "target_agent": target_agent,
             "status": "processing",
             "research_query_id": query_id,
             "message": f"Research task queued. Check /research/result/{query_id} for results."
         }
+        if routing_info:
+            response["routing"] = routing_info
+        return response
+
+    response = {
+        "task_id": task_id,
+        "target_agent": target_agent,
+        "status": "pending",
+        "message": f"Task submitted to {target_agent}"
+    }
+    if routing_info:
+        response["routing"] = routing_info
+    return response
+
+
+@router.post("/a2a/route")
+async def route_task_endpoint(
+    task_description: str,
+    prefer_agent: Optional[str] = None
+):
+    """
+    Get routing suggestion without submitting the task.
+
+    Use this to preview where a task would be routed.
+    """
+    from .semantic_router import route_task, get_router
+
+    system = get_learning_system()
+    await system.initialize()
+
+    # Get current agent status
+    available_agents = await system.get_agents()
+
+    # Get routing result
+    router = get_router()
+    result = router.route_task(
+        task_description=task_description,
+        available_agents=available_agents,
+        prefer_agent=prefer_agent
+    )
+
+    # Get all suggestions
+    suggestions = router.suggest_agents(
+        task_description=task_description,
+        available_agents=available_agents,
+        top_n=3
+    )
 
     return {
-        "task_id": task_id,
-        "status": "pending",
-        "message": f"Task submitted to {request.to_agent}"
+        "recommended": {
+            "agent": result.target_agent,
+            "confidence": result.confidence,
+            "domain": result.domain.value,
+            "matched_capabilities": result.matched_capabilities,
+            "reasoning": result.reasoning
+        },
+        "alternatives": [
+            {
+                "agent": s.target_agent,
+                "confidence": s.confidence,
+                "domain": s.domain.value
+            }
+            for s in suggestions if s.target_agent != result.target_agent
+        ]
     }
 
 
@@ -809,6 +991,7 @@ async def agent_heartbeat(request: A2AHeartbeat):
 async def discover_agents():
     """
     Discover available agents and their capabilities.
+    Returns A2A v0.3 compliant Agent Cards for all registered agents.
     Used by agents to find other agents they can collaborate with.
     """
     system = get_learning_system()
@@ -816,14 +999,61 @@ async def discover_agents():
 
     agents = await system.get_agents()
 
-    return {
-        "agents": agents,
-        "count": len(agents),
-        "orchestrator": {
-            "id": "benchai",
-            "endpoint": "http://localhost:8085",
-            "capabilities": ["research", "memory", "rag", "zettelkasten", "training"]
+    # Build Agent Cards for each registered agent
+    agent_cards = []
+    for agent in agents:
+        agent_card = {
+            "name": agent.get("name", agent.get("id", "unknown")),
+            "id": agent.get("id", "unknown"),
+            "description": f"{agent.get('role', 'agent').capitalize()} agent with capabilities: {', '.join(agent.get('capabilities', []))}",
+            "url": agent.get("endpoint", ""),
+            "protocol_version": "0.3",
+            "status": agent.get("status", "offline"),
+            "role": agent.get("role", "agent"),
+            "capabilities": agent.get("capabilities", []),
+            "skills": [
+                {
+                    "id": cap,
+                    "name": cap.replace("_", " ").title(),
+                    "available": agent.get("status") == "online"
+                }
+                for cap in agent.get("capabilities", [])
+            ],
+            "load": agent.get("load", 0.0),
+            "current_task": agent.get("current_task"),
+            "last_heartbeat": agent.get("last_heartbeat"),
+            "registered_at": agent.get("registered_at")
         }
+        agent_cards.append(agent_card)
+
+    # BenchAI orchestrator Agent Card
+    orchestrator_card = {
+        "name": "BenchAI",
+        "id": "benchai",
+        "description": "Central AI orchestrator with knowledge management, multi-agent coordination, and self-improving learning systems",
+        "url": "http://localhost:8085",
+        "protocol_version": "0.3",
+        "status": "online",
+        "role": "orchestrator",
+        "capabilities": ["research", "memory", "rag", "zettelkasten", "training", "experience_replay", "tts", "orchestration"],
+        "skills": [
+            {"id": "research", "name": "Deep Research", "available": True},
+            {"id": "memory", "name": "Persistent Memory", "available": True},
+            {"id": "rag", "name": "RAG Pipeline", "available": True},
+            {"id": "zettelkasten", "name": "Knowledge Graph", "available": True},
+            {"id": "training", "name": "LoRA Training", "available": True},
+            {"id": "experience_replay", "name": "Experience Replay", "available": True},
+            {"id": "tts", "name": "Text-to-Speech", "available": True},
+            {"id": "orchestration", "name": "Multi-Agent Orchestration", "available": True}
+        ],
+        "agent_card_url": "http://localhost:8085/.well-known/agent.json"
+    }
+
+    return {
+        "agents": agent_cards,
+        "count": len(agent_cards),
+        "orchestrator": orchestrator_card,
+        "protocol_version": "A2A v0.3"
     }
 
 

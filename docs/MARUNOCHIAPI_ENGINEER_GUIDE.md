@@ -10,9 +10,9 @@
 
 BenchAI is running at `http://[BENCHAI_IP]:8085` and serves as the central knowledge repository and orchestrator.
 
-### 1. Register Your Agent
+### 1. Register Your Agent with A2A v0.3 Agent Card
 
-On startup, register with BenchAI:
+On startup, register with BenchAI using a full Agent Card:
 
 ```python
 import httpx
@@ -21,6 +21,7 @@ import asyncio
 BENCHAI_URL = "http://[BENCHAI_IP]:8085"
 
 async def register_agent():
+    """Register with full A2A v0.3 Agent Card for discovery."""
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{BENCHAI_URL}/v1/learning/agents/register",
@@ -28,11 +29,46 @@ async def register_agent():
                 "agent_id": "marunochiAI",
                 "name": "MarunochiAI",
                 "role": "programmer",
-                "capabilities": ["coding", "debugging", "testing", "code_review", "refactoring"],
-                "endpoint": "http://[YOUR_IP]:8086"  # Your local endpoint
+                "description": "Professional coding agent specialized in Python, TypeScript, and full-stack development",
+                "capabilities": ["coding", "debugging", "testing", "code_review", "refactoring", "architecture"],
+                "endpoint": "http://[YOUR_IP]:8086",
+                "version": "1.0.0",
+                "skills": [
+                    {
+                        "id": "python_coding",
+                        "name": "Python Development",
+                        "description": "Expert Python development including async, type hints, and testing",
+                        "tags": ["python", "async", "pytest"],
+                        "input_modes": ["text/plain", "application/json"],
+                        "output_modes": ["text/plain", "application/json"]
+                    },
+                    {
+                        "id": "code_review",
+                        "name": "Code Review",
+                        "description": "Thorough code review with security, performance, and style analysis",
+                        "tags": ["review", "security", "quality"]
+                    },
+                    {
+                        "id": "debugging",
+                        "name": "Debugging",
+                        "description": "Debug complex issues with systematic root cause analysis",
+                        "tags": ["debug", "troubleshooting"]
+                    }
+                ],
+                "default_input_modes": ["text/plain", "application/json"],
+                "default_output_modes": ["text/plain", "application/json"],
+                "provider": {
+                    "organization": "Marunochi Labs",
+                    "contact": "marunochi@localhost"
+                }
             }
         )
-        print(f"Registration: {response.json()}")
+        result = response.json()
+        print(f"Registration: {result}")
+        print(f"Agent Card URL: {result.get('agent_card_url')}")
+
+# Your Agent Card can be retrieved at:
+# GET http://BENCHAI_IP:8085/v1/learning/agents/marunochiAI/card
 ```
 
 ### 2. Send Heartbeats

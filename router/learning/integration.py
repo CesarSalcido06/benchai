@@ -327,16 +327,28 @@ class LearningSystem:
         name: str,
         role: str,
         capabilities: List[str],
-        endpoint: Optional[str] = None
+        endpoint: Optional[str] = None,
+        agent_card: Optional[Dict] = None
     ):
-        """Register an agent in the multi-agent system."""
+        """
+        Register an agent in the multi-agent system.
+
+        Args:
+            agent_id: Unique agent identifier
+            name: Display name
+            role: Agent role (orchestrator, programmer, creative, etc.)
+            capabilities: List of capability strings
+            endpoint: HTTP endpoint for A2A communication
+            agent_card: Full A2A v0.3 Agent Card (stored in metadata)
+        """
         await self.initialize()
         await self.memory.register_agent(
             agent_id=agent_id,
             name=name,
             role=role,
             capabilities=capabilities,
-            endpoint=endpoint
+            endpoint=endpoint,
+            metadata=agent_card
         )
 
     async def get_agents(self, status: Optional[str] = None) -> List[Dict]:

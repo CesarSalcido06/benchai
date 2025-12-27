@@ -4922,6 +4922,139 @@ async def health():
         }
     }
 
+
+# =========================================================================
+# A2A v0.3 Agent Card Endpoint
+# =========================================================================
+
+BENCHAI_AGENT_CARD = {
+    "name": "BenchAI",
+    "description": "Central AI orchestrator with knowledge management, multi-agent coordination, and self-improving learning systems. Specializes in deep research, memory management, and coordinating tasks between specialized agents.",
+    "url": "http://localhost:8085",
+    "version": "3.5.0",
+    "protocol_version": "0.3",
+    "capabilities": {
+        "streaming": True,
+        "push_notifications": False,
+        "state_transition_history": True
+    },
+    "authentication": {
+        "schemes": ["none"]  # Add API key auth later
+    },
+    "default_input_modes": ["text/plain", "application/json"],
+    "default_output_modes": ["text/plain", "application/json", "text/event-stream"],
+    "skills": [
+        {
+            "id": "research",
+            "name": "Deep Research",
+            "description": "Perform deep research using Zettelkasten knowledge graph with semantic linking and automatic discovery",
+            "tags": ["research", "knowledge", "zettelkasten"],
+            "input_modes": ["text/plain"],
+            "output_modes": ["application/json"],
+            "examples": [
+                "What are best practices for async database connections?",
+                "Explain the relationship between transformers and attention mechanisms"
+            ]
+        },
+        {
+            "id": "memory",
+            "name": "Persistent Memory",
+            "description": "Store and retrieve memories with semantic search, importance decay, and automatic consolidation",
+            "tags": ["memory", "knowledge", "persistent"],
+            "input_modes": ["text/plain", "application/json"],
+            "output_modes": ["application/json"]
+        },
+        {
+            "id": "rag",
+            "name": "RAG Pipeline",
+            "description": "Retrieval-augmented generation using ChromaDB with HNSW indexing for fast similarity search",
+            "tags": ["rag", "retrieval", "vector-search"],
+            "input_modes": ["text/plain"],
+            "output_modes": ["application/json"]
+        },
+        {
+            "id": "orchestration",
+            "name": "Multi-Agent Orchestration",
+            "description": "Coordinate tasks between specialized agents (MarunochiAI for coding, DottscavisAI for creative work)",
+            "tags": ["orchestration", "multi-agent", "coordination"],
+            "input_modes": ["application/json"],
+            "output_modes": ["application/json"]
+        },
+        {
+            "id": "experience_replay",
+            "name": "Experience Replay",
+            "description": "Learn from past successes with curiosity-driven prioritized experience replay",
+            "tags": ["learning", "experience", "self-improvement"],
+            "input_modes": ["application/json"],
+            "output_modes": ["application/json"]
+        },
+        {
+            "id": "inference",
+            "name": "Local LLM Inference",
+            "description": "Run inference on local LLMs with VRAM management and model hot-swapping",
+            "tags": ["llm", "inference", "local"],
+            "input_modes": ["application/json"],
+            "output_modes": ["text/event-stream", "application/json"]
+        },
+        {
+            "id": "tts",
+            "name": "Text-to-Speech",
+            "description": "Convert text to speech using Piper TTS engine",
+            "tags": ["tts", "audio", "speech"],
+            "input_modes": ["text/plain", "application/json"],
+            "output_modes": ["audio/wav"]
+        }
+    ],
+    "provider": {
+        "organization": "BenchAI",
+        "contact": "benchai@localhost"
+    }
+}
+
+
+@app.get("/.well-known/agent.json")
+async def agent_card():
+    """
+    A2A v0.3 Agent Card - Standard endpoint for agent discovery.
+    Other agents can fetch this to understand BenchAI's capabilities.
+    """
+    # Dynamically update capabilities based on current state
+    card = BENCHAI_AGENT_CARD.copy()
+    card["capabilities"] = {
+        "streaming": True,
+        "push_notifications": False,
+        "state_transition_history": True,
+        "tts": PIPER_AVAILABLE,
+        "rag": CHROMADB_AVAILABLE,
+        "learning": LEARNING_AVAILABLE,
+        "obsidian": OBSIDIAN_AVAILABLE
+    }
+
+    # Update skills availability
+    available_skills = []
+    for skill in BENCHAI_AGENT_CARD["skills"]:
+        skill_copy = skill.copy()
+        if skill["id"] == "tts":
+            skill_copy["available"] = PIPER_AVAILABLE
+        elif skill["id"] == "rag":
+            skill_copy["available"] = CHROMADB_AVAILABLE
+        elif skill["id"] in ["research", "memory", "experience_replay", "orchestration"]:
+            skill_copy["available"] = LEARNING_AVAILABLE
+        else:
+            skill_copy["available"] = True
+        available_skills.append(skill_copy)
+
+    card["skills"] = available_skills
+    card["updated_at"] = datetime.now().isoformat()
+
+    return card
+
+
+@app.get("/.well-known/agent-card.json")
+async def agent_card_alt():
+    """Alias for agent card (some implementations use this path)."""
+    return await agent_card()
+
 @app.get("/v1/metrics")
 async def metrics():
     """Get comprehensive system metrics for monitoring."""

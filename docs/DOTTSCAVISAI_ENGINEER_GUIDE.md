@@ -10,9 +10,9 @@
 
 BenchAI is running at `http://[BENCHAI_IP]:8085` and serves as the central knowledge repository and orchestrator.
 
-### 1. Register Your Agent
+### 1. Register Your Agent with A2A v0.3 Agent Card
 
-On startup, register with BenchAI:
+On startup, register with BenchAI using a full Agent Card:
 
 ```python
 import httpx
@@ -21,6 +21,7 @@ import asyncio
 BENCHAI_URL = "http://[BENCHAI_IP]:8085"
 
 async def register_agent():
+    """Register with full A2A v0.3 Agent Card for discovery."""
     async with httpx.AsyncClient() as client:
         response = await client.post(
             f"{BENCHAI_URL}/v1/learning/agents/register",
@@ -28,6 +29,7 @@ async def register_agent():
                 "agent_id": "dottscavisAI",
                 "name": "DottscavisAI",
                 "role": "creative",
+                "description": "Creative AI agent specialized in image generation, video editing, 3D modeling, and audio processing",
                 "capabilities": [
                     "image_generation",
                     "video_editing",
@@ -36,10 +38,50 @@ async def register_agent():
                     "animation",
                     "compositing"
                 ],
-                "endpoint": "http://[YOUR_IP]:8087"  # Your local endpoint
+                "endpoint": "http://[YOUR_IP]:8087",
+                "version": "1.0.0",
+                "skills": [
+                    {
+                        "id": "image_generation",
+                        "name": "Image Generation",
+                        "description": "Generate images using Stable Diffusion with MLX optimization",
+                        "tags": ["image", "diffusion", "sdxl"],
+                        "input_modes": ["text/plain", "application/json"],
+                        "output_modes": ["image/png", "image/jpeg"]
+                    },
+                    {
+                        "id": "video_editing",
+                        "name": "Video Editing",
+                        "description": "Edit and compose video using FFmpeg and video processing pipelines",
+                        "tags": ["video", "ffmpeg", "editing"]
+                    },
+                    {
+                        "id": "3d_modeling",
+                        "name": "3D Modeling",
+                        "description": "Create 3D models and scenes using Blender Python API",
+                        "tags": ["3d", "blender", "modeling"]
+                    },
+                    {
+                        "id": "audio_processing",
+                        "name": "Audio Processing",
+                        "description": "Process audio and transcribe with Whisper",
+                        "tags": ["audio", "whisper", "transcription"]
+                    }
+                ],
+                "default_input_modes": ["text/plain", "application/json"],
+                "default_output_modes": ["application/json", "image/png"],
+                "provider": {
+                    "organization": "Dottscavis Labs",
+                    "contact": "dottscavis@localhost"
+                }
             }
         )
-        print(f"Registration: {response.json()}")
+        result = response.json()
+        print(f"Registration: {result}")
+        print(f"Agent Card URL: {result.get('agent_card_url')}")
+
+# Your Agent Card can be retrieved at:
+# GET http://BENCHAI_IP:8085/v1/learning/agents/dottscavisAI/card
 ```
 
 ### 2. Send Heartbeats
