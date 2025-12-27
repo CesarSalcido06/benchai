@@ -826,13 +826,62 @@ async def research_stats():
 # Multi-Agent A2A Protocol Endpoints
 # =========================================================================
 
+class A2ATraceContext(BaseModel):
+    """W3C TraceContext for distributed tracing."""
+    trace_id: Optional[str] = None
+    span_id: Optional[str] = None
+    trace_flags: Optional[str] = None
+    trace_state: Optional[str] = None
+
+
+class A2AConversationContext(BaseModel):
+    """Compressed conversation context."""
+    summary: Optional[str] = None  # Brief summary of conversation so far
+    key_decisions: List[str] = []  # Key decisions made
+    current_goal: Optional[str] = None  # What we're trying to achieve
+    message_count: int = 0  # Number of messages in conversation
+
+
+class A2ATaskChainContext(BaseModel):
+    """Context about the chain of tasks leading to this one."""
+    parent_task_id: Optional[str] = None
+    root_task_id: Optional[str] = None
+    chain_depth: int = 0
+    previous_results: List[Dict[str, Any]] = []  # Results from parent tasks
+
+
+class A2AKnowledgeContext(BaseModel):
+    """Relevant knowledge to include with the task."""
+    zettelkasten_ids: List[str] = []  # Relevant Zettelkasten note IDs
+    memory_ids: List[int] = []  # Relevant memory IDs
+    embedded_knowledge: List[Dict[str, str]] = []  # Pre-fetched knowledge items
+
+
+class A2AContext(BaseModel):
+    """
+    Enhanced context passing protocol for A2A communication.
+
+    Supports:
+    - W3C TraceContext for distributed tracing
+    - Conversation context for continuity
+    - Task chain context for multi-step workflows
+    - Knowledge context for relevant information
+    """
+    trace: Optional[A2ATraceContext] = None
+    conversation: Optional[A2AConversationContext] = None
+    task_chain: Optional[A2ATaskChainContext] = None
+    knowledge: Optional[A2AKnowledgeContext] = None
+    custom: Optional[Dict[str, Any]] = None  # For backward compatibility
+
+
 class A2ATaskRequest(BaseModel):
     """Request from one agent to another to perform a task."""
     from_agent: str
     to_agent: str
     task_type: str  # research, code, creative, general
     task_description: str
-    context: Optional[Dict[str, Any]] = None
+    context: Optional[A2AContext] = None  # Enhanced context protocol
+    legacy_context: Optional[Dict[str, Any]] = None  # Backward compat
     priority: str = "normal"
     callback_url: Optional[str] = None  # URL to call when task completes
 
@@ -843,6 +892,7 @@ class A2ATaskResponse(BaseModel):
     status: str  # pending, in_progress, completed, failed
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    context: Optional[A2AContext] = None  # Return context for chaining
 
 
 class A2AHeartbeat(BaseModel):
@@ -852,6 +902,71 @@ class A2AHeartbeat(BaseModel):
     current_task: Optional[str] = None
     capabilities: List[str] = []
     load: float = 0.0  # 0.0 to 1.0
+
+
+async def enrich_context(
+    context: Optional[A2AContext],
+    task_id: str,
+    task_description: str,
+    system
+) -> A2AContext:
+    """
+    Enrich context with trace info and relevant knowledge.
+
+    Automatically adds:
+    - OpenTelemetry trace context if available
+    - Relevant Zettelkasten notes based on task description
+    - Recent related memories
+    """
+    if context is None:
+        context = A2AContext()
+
+    # Add trace context from OpenTelemetry
+    if TELEMETRY_AVAILABLE:
+        telemetry = get_telemetry()
+        trace_id = telemetry.get_current_trace_id()
+        if trace_id:
+            context.trace = A2ATraceContext(trace_id=trace_id)
+
+    # Enrich with relevant knowledge if not already provided
+    if context.knowledge is None or not context.knowledge.embedded_knowledge:
+        try:
+            # Search Zettelkasten for relevant notes
+            zk_results = await system.zettelkasten.search(
+                query=task_description,
+                limit=3
+            )
+
+            # Search memory for relevant items
+            memory_results = await system.memory.search(
+                query=task_description,
+                limit=3,
+                min_importance=3
+            )
+
+            knowledge = A2AKnowledgeContext(
+                zettelkasten_ids=[n.get('id', '') for n in zk_results if n.get('id')],
+                memory_ids=[m.get('id', 0) for m in memory_results if m.get('id')],
+                embedded_knowledge=[
+                    {"type": "zettel", "content": n.get('content', '')[:500]}
+                    for n in zk_results[:2]
+                ] + [
+                    {"type": "memory", "content": m.get('content', '')[:500]}
+                    for m in memory_results[:2]
+                ]
+            )
+            context.knowledge = knowledge
+        except Exception:
+            pass  # Knowledge enrichment is optional
+
+    # Set task chain context if not provided
+    if context.task_chain is None:
+        context.task_chain = A2ATaskChainContext(
+            root_task_id=task_id,
+            chain_depth=0
+        )
+
+    return context
 
 
 @router.post("/a2a/task")
@@ -874,6 +989,14 @@ async def submit_a2a_task(request: A2ATaskRequest, background_tasks: BackgroundT
     task_id = f"a2a-{uuid.uuid4().hex[:12]}"
     target_agent = request.to_agent
     routing_info = None
+
+    # === CONTEXT ENRICHMENT ===
+    enriched_context = await enrich_context(
+        context=request.context,
+        task_id=task_id,
+        task_description=request.task_description,
+        system=system
+    )
 
     # === TELEMETRY: Start tracing ===
     telemetry = get_telemetry() if TELEMETRY_AVAILABLE else None
@@ -949,7 +1072,8 @@ async def submit_a2a_task(request: A2ATaskRequest, background_tasks: BackgroundT
             "target_agent": target_agent,
             "status": "processing",
             "research_query_id": query_id,
-            "message": f"Research task queued. Check /research/result/{query_id} for results."
+            "message": f"Research task queued. Check /research/result/{query_id} for results.",
+            "context": enriched_context.model_dump() if enriched_context else None
         }
         if routing_info:
             response["routing"] = routing_info
@@ -959,7 +1083,8 @@ async def submit_a2a_task(request: A2ATaskRequest, background_tasks: BackgroundT
         "task_id": task_id,
         "target_agent": target_agent,
         "status": "pending",
-        "message": f"Task submitted to {target_agent}"
+        "message": f"Task submitted to {target_agent}",
+        "context": enriched_context.model_dump() if enriched_context else None
     }
     if routing_info:
         response["routing"] = routing_info
@@ -1015,6 +1140,77 @@ async def route_task_endpoint(
             }
             for s in suggestions if s.target_agent != result.target_agent
         ]
+    }
+
+
+@router.get("/a2a/context-schema")
+async def get_context_schema():
+    """
+    Get the A2A context protocol schema.
+
+    Returns documentation of the enhanced context passing protocol
+    for inter-agent communication.
+    """
+    return {
+        "protocol_version": "1.0",
+        "description": "Enhanced context passing protocol for A2A communication",
+        "schema": {
+            "trace": {
+                "description": "W3C TraceContext for distributed tracing",
+                "fields": {
+                    "trace_id": "32-hex-char trace identifier",
+                    "span_id": "16-hex-char span identifier",
+                    "trace_flags": "Trace flags (e.g., '01' for sampled)",
+                    "trace_state": "Vendor-specific trace state"
+                }
+            },
+            "conversation": {
+                "description": "Compressed conversation context",
+                "fields": {
+                    "summary": "Brief summary of conversation so far",
+                    "key_decisions": "List of key decisions made",
+                    "current_goal": "What we're trying to achieve",
+                    "message_count": "Number of messages in conversation"
+                }
+            },
+            "task_chain": {
+                "description": "Context about task chain",
+                "fields": {
+                    "parent_task_id": "ID of parent task (if chained)",
+                    "root_task_id": "ID of root task in chain",
+                    "chain_depth": "Depth in task chain (0 = root)",
+                    "previous_results": "Results from parent tasks"
+                }
+            },
+            "knowledge": {
+                "description": "Relevant knowledge context",
+                "fields": {
+                    "zettelkasten_ids": "Relevant Zettelkasten note IDs",
+                    "memory_ids": "Relevant memory IDs",
+                    "embedded_knowledge": "Pre-fetched knowledge items"
+                }
+            },
+            "custom": "Dict for backward compatibility and custom data"
+        },
+        "example": {
+            "trace": {"trace_id": "00000000000000000000000000000001"},
+            "conversation": {
+                "summary": "Debugging auth issue in user service",
+                "key_decisions": ["Use JWT tokens", "Add rate limiting"],
+                "current_goal": "Fix token refresh logic",
+                "message_count": 5
+            },
+            "task_chain": {
+                "parent_task_id": "a2a-abc123",
+                "root_task_id": "a2a-xyz789",
+                "chain_depth": 1
+            },
+            "knowledge": {
+                "embedded_knowledge": [
+                    {"type": "zettel", "content": "JWT best practices..."}
+                ]
+            }
+        }
     }
 
 
