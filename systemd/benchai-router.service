@@ -1,0 +1,20 @@
+[Unit]
+Description=BenchAI Router (Multi-Agent Orchestrator)
+After=network.target benchai-llm.service docker.service
+Wants=benchai-llm.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=user
+WorkingDirectory=/home/user/benchai/router
+Environment="PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONUNBUFFERED=1"
+ExecStartPre=/bin/bash -c 'docker start qdrant 2>/dev/null || true'
+ExecStartPre=/bin/sleep 5
+ExecStart=/usr/bin/python3 /home/user/benchai/router/llm_router.py
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
