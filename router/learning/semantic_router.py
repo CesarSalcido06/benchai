@@ -9,9 +9,51 @@ Routes tasks to the appropriate agent based on:
 """
 
 import re
-from typing import Dict, List, Optional, Tuple
+import aiohttp
+from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from enum import Enum
+
+
+async def call_marunochi_search(query: str, limit: int = 10) -> Optional[Dict[str, Any]]:
+    """
+    Call MarunochiAI's codebase search endpoint.
+
+    Args:
+        query: Search query
+        limit: Max results
+
+    Returns:
+        Search results or None if unavailable
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "http://localhost:8765/v1/codebase/search",
+                json={"query": query, "limit": limit},
+                timeout=aiohttp.ClientTimeout(total=5)
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception:
+        pass
+    return None
+
+
+async def check_marunochi_health() -> bool:
+    """Check if MarunochiAI is available."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "http://localhost:8765/health",
+                timeout=aiohttp.ClientTimeout(total=2)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("status") in ["healthy", "degraded"]
+    except Exception:
+        pass
+    return False
 
 
 class TaskDomain(Enum):
@@ -92,12 +134,24 @@ AGENT_CAPABILITIES = {
         "domains": [TaskDomain.CODING],
         "capabilities": [
             "coding", "debugging", "testing", "code_review", "refactoring",
-            "architecture", "python", "typescript", "fullstack"
+            "architecture", "python", "typescript", "fullstack",
+            # Phase 2: Code Understanding
+            "code_search", "semantic_search", "codebase_indexing",
+            "hybrid_search", "code_completion", "code_explanation"
         ],
         "keywords": [
             "write code", "fix bug", "review code", "implement feature",
-            "unit test", "integration test", "api", "backend", "frontend"
+            "unit test", "integration test", "api", "backend", "frontend",
+            # Phase 2 keywords
+            "search code", "find function", "where is", "code for",
+            "index codebase", "search codebase", "find class", "find method"
         ],
+        "endpoints": {
+            "chat": "http://localhost:8765/v1/chat/completions",
+            "search": "http://localhost:8765/v1/codebase/search",
+            "index": "http://localhost:8765/v1/codebase/index",
+            "stats": "http://localhost:8765/v1/codebase/stats"
+        },
         "always_available": False,
         "priority": 0.95  # Very high for coding tasks
     },
