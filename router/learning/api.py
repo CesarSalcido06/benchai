@@ -1167,3 +1167,197 @@ async def get_agent_messages(
 # Import for A2A
 from datetime import datetime
 from .research_api import QueryPriority
+
+
+# =========================================================================
+# Collective Learning Pipeline Endpoints
+# =========================================================================
+
+class CollectiveContributionRequest(BaseModel):
+    """Request to submit a learning contribution."""
+    agent_id: str
+    contribution_type: str = "experience"  # experience, knowledge, pattern, correction, feedback
+    content: str
+    domain: str
+    quality_score: float = Field(default=0.7, ge=0, le=1)
+    metadata: Optional[Dict[str, Any]] = None
+
+
+@router.post("/collective/contribute")
+async def submit_contribution(request: CollectiveContributionRequest):
+    """
+    Submit a learning contribution from an agent.
+
+    Contributions are aggregated for collective pattern identification
+    and cross-agent knowledge transfer.
+    """
+    from .collective_learning import get_collective_pipeline, LearningContributionType
+
+    pipeline = get_collective_pipeline()
+    await pipeline.initialize()
+
+    try:
+        contrib_type = LearningContributionType(request.contribution_type)
+    except ValueError:
+        contrib_type = LearningContributionType.EXPERIENCE
+
+    contribution_id = await pipeline.submit_contribution(
+        agent_id=request.agent_id,
+        contribution_type=contrib_type,
+        content=request.content,
+        domain=request.domain,
+        quality_score=request.quality_score,
+        metadata=request.metadata
+    )
+
+    # Record telemetry
+    if TELEMETRY_AVAILABLE:
+        telemetry = get_telemetry()
+        telemetry.experience_counter.add(1, {
+            "agent": request.agent_id,
+            "domain": request.domain,
+            "type": "collective"
+        })
+
+    return {
+        "status": "ok",
+        "contribution_id": contribution_id,
+        "message": f"Contribution from {request.agent_id} recorded for collective learning"
+    }
+
+
+@router.post("/collective/identify-patterns")
+async def identify_patterns(
+    min_occurrences: int = Query(3, ge=2, le=20),
+    domains: Optional[str] = Query(None, description="Comma-separated domains")
+):
+    """
+    Trigger pattern identification from collective experiences.
+
+    Analyzes contributions to find common success strategies,
+    error patterns, and best practices across agents.
+    """
+    from .collective_learning import get_collective_pipeline
+
+    pipeline = get_collective_pipeline()
+    await pipeline.initialize()
+
+    domain_list = domains.split(",") if domains else None
+
+    insights = await pipeline.identify_patterns(
+        min_occurrences=min_occurrences,
+        domains=domain_list
+    )
+
+    return {
+        "patterns_identified": len(insights),
+        "insights": [
+            {
+                "id": i.id,
+                "type": i.insight_type,
+                "description": i.description,
+                "domains": i.domains,
+                "contributing_agents": i.contributing_agents,
+                "confidence": i.confidence,
+                "evidence_count": i.evidence_count
+            }
+            for i in insights
+        ]
+    }
+
+
+@router.get("/collective/insights")
+async def get_collective_insights(
+    insight_type: Optional[str] = None,
+    domain: Optional[str] = None,
+    min_confidence: float = Query(0.5, ge=0, le=1),
+    limit: int = Query(20, ge=1, le=100)
+):
+    """
+    Get collective insights derived from cross-agent learning.
+
+    Returns patterns, best practices, and strategies identified
+    from aggregated agent experiences.
+    """
+    from .collective_learning import get_collective_pipeline
+
+    pipeline = get_collective_pipeline()
+    await pipeline.initialize()
+
+    insights = await pipeline.get_insights(
+        insight_type=insight_type,
+        domain=domain,
+        min_confidence=min_confidence,
+        limit=limit
+    )
+
+    return {
+        "insights": insights,
+        "count": len(insights)
+    }
+
+
+@router.get("/collective/stats")
+async def get_collective_stats():
+    """
+    Get collective learning statistics.
+
+    Shows contribution counts by agent, domain, and type,
+    plus aggregation and insight generation metrics.
+    """
+    from .collective_learning import get_collective_pipeline
+
+    pipeline = get_collective_pipeline()
+    await pipeline.initialize()
+
+    return await pipeline.get_collective_stats()
+
+
+@router.get("/collective/share/{agent_id}")
+async def share_learning_with_agent(
+    agent_id: str,
+    domains: Optional[str] = Query(None, description="Comma-separated domains"),
+    limit: int = Query(10, ge=1, le=50)
+):
+    """
+    Package collective learnings to share with an agent.
+
+    Returns relevant insights, peer contributions, and recommendations
+    tailored to the agent's domains and learning history.
+    """
+    from .collective_learning import get_collective_pipeline
+
+    pipeline = get_collective_pipeline()
+    await pipeline.initialize()
+
+    domain_list = domains.split(",") if domains else None
+
+    return await pipeline.share_learning_with_agent(
+        agent_id=agent_id,
+        domains=domain_list,
+        limit=limit
+    )
+
+
+@router.get("/collective/agent-stats/{agent_id}")
+async def get_agent_learning_stats(agent_id: str):
+    """
+    Get learning statistics for a specific agent.
+
+    Shows contribution count, quality scores, and specializations.
+    """
+    from .collective_learning import get_collective_pipeline
+
+    pipeline = get_collective_pipeline()
+    await pipeline.initialize()
+
+    stats = await pipeline.get_agent_learning_stats(agent_id)
+
+    if not stats:
+        return {
+            "agent_id": agent_id,
+            "status": "no_contributions",
+            "message": "This agent has not yet contributed to collective learning"
+        }
+
+    return stats
