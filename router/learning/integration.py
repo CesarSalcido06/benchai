@@ -18,6 +18,8 @@ from .memory_enhanced import EnhancedMemoryManager, MemoryType
 from .experience_replay import ExperienceReplayManager, Experience, ExperienceOutcome, TaskDomain
 from .interaction_logger import InteractionLogger, InteractionType
 from .learning_pipeline import LearningPipeline, AdapterType, TrainingConfig
+from .zettelkasten import ZettelkastenKnowledgeGraph, ZettelType, LinkType
+from .research_api import ResearchAPI, QueryPriority
 
 
 class LearningSystem:
@@ -48,6 +50,10 @@ class LearningSystem:
             interaction_logger=self.logger
         )
 
+        # Zettelkasten knowledge graph (Layer 0)
+        self.zettelkasten = ZettelkastenKnowledgeGraph(storage_dir / "zettelkasten" / "knowledge.db")
+        self.research_api: Optional[ResearchAPI] = None
+
         self._initialized = False
         self._maintenance_task = None
 
@@ -61,8 +67,13 @@ class LearningSystem:
         await self.logger.initialize()
         await self.pipeline.initialize()
 
+        # Initialize Zettelkasten and Research API
+        await self.zettelkasten.initialize()
+        self.research_api = ResearchAPI(self.zettelkasten)
+        await self.research_api.start()
+
         self._initialized = True
-        print("[LEARNING-SYSTEM] All components initialized")
+        print("[LEARNING-SYSTEM] All components initialized (including Zettelkasten)")
 
     async def start_maintenance_loop(self, interval_hours: int = 24):
         """Start background maintenance tasks."""
@@ -89,6 +100,10 @@ class LearningSystem:
                 pass
             self._maintenance_task = None
 
+        # Stop research API
+        if self.research_api:
+            await self.research_api.stop()
+
     async def run_maintenance(self) -> Dict:
         """Run all maintenance tasks."""
         await self.initialize()
@@ -111,7 +126,11 @@ class LearningSystem:
         await self.logger.aggregate_metrics()
         results["metrics_aggregation"] = "completed"
 
-        # 5. Check if training should be triggered
+        # 5. Zettelkasten sleep consolidation (brain-inspired memory processing)
+        zettel_consolidation = await self.zettelkasten.sleep_consolidation()
+        results["zettelkasten_consolidation"] = zettel_consolidation
+
+        # 6. Check if training should be triggered
         for adapter_type in AdapterType:
             should_train, reason = await self.pipeline.should_trigger_training(adapter_type)
             results[f"training_{adapter_type.value}"] = {"should_train": should_train, "reason": reason}

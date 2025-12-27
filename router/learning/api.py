@@ -505,3 +505,373 @@ async def run_maintenance(background_tasks: BackgroundTasks):
 
     background_tasks.add_task(system.run_maintenance)
     return {"status": "started", "message": "Maintenance tasks running in background"}
+
+
+# =========================================================================
+# Zettelkasten Knowledge Graph Endpoints
+# =========================================================================
+
+class ZettelCreateRequest(BaseModel):
+    content: str
+    title: Optional[str] = None
+    zettel_type: str = "permanent"
+    tags: List[str] = []
+    source: str = "api"
+
+
+class ZettelSearchRequest(BaseModel):
+    query: str
+    limit: int = Field(default=10, ge=1, le=50)
+    zettel_type: Optional[str] = None
+    expand_graph: bool = True
+    graph_depth: int = Field(default=2, ge=1, le=5)
+
+
+class ResearchQueryRequest(BaseModel):
+    query: str
+    agent_id: str
+    priority: str = "normal"
+    expand_graph: bool = True
+    graph_depth: int = 2
+    max_results: int = 10
+
+
+@router.post("/zettelkasten/create")
+async def create_zettel(request: ZettelCreateRequest):
+    """Create a new Zettel (atomic knowledge note)."""
+    from .zettelkasten import ZettelType
+    system = get_learning_system()
+    await system.initialize()
+
+    try:
+        ztype = ZettelType(request.zettel_type)
+    except ValueError:
+        ztype = ZettelType.PERMANENT
+
+    zettel_id = await system.zettelkasten.create_zettel(
+        content=request.content,
+        title=request.title,
+        zettel_type=ztype,
+        tags=request.tags,
+        source=request.source
+    )
+
+    return {"id": zettel_id, "status": "created"}
+
+
+@router.get("/zettelkasten/search")
+async def search_zettelkasten(
+    query: str,
+    limit: int = Query(10, ge=1, le=50),
+    zettel_type: Optional[str] = None,
+    expand_graph: bool = True
+):
+    """Search the Zettelkasten knowledge graph."""
+    system = get_learning_system()
+    await system.initialize()
+
+    results = await system.zettelkasten.search(
+        query=query,
+        limit=limit,
+        expand_graph=expand_graph
+    )
+
+    return {"results": results, "count": len(results)}
+
+
+@router.get("/zettelkasten/{zettel_id}")
+async def get_zettel(zettel_id: str):
+    """Get a specific Zettel by ID."""
+    system = get_learning_system()
+    await system.initialize()
+
+    zettel = await system.zettelkasten.get_zettel(zettel_id)
+    if not zettel:
+        raise HTTPException(status_code=404, detail="Zettel not found")
+
+    return zettel
+
+
+@router.get("/zettelkasten/{zettel_id}/connected")
+async def get_connected_knowledge(zettel_id: str, depth: int = Query(2, ge=1, le=5)):
+    """Get knowledge graph centered on a Zettel."""
+    system = get_learning_system()
+    await system.initialize()
+
+    graph = await system.zettelkasten.get_connected_knowledge(zettel_id, max_depth=depth)
+    return graph
+
+
+@router.get("/zettelkasten/hubs")
+async def get_hub_notes(limit: int = Query(10, ge=1, le=50)):
+    """Find hub notes (highly connected entry points)."""
+    system = get_learning_system()
+    await system.initialize()
+
+    hubs = await system.zettelkasten.find_hubs(limit=limit)
+    return {"hubs": hubs, "count": len(hubs)}
+
+
+@router.post("/zettelkasten/consolidate")
+async def consolidate_zettelkasten(background_tasks: BackgroundTasks):
+    """Trigger sleep consolidation (strengthen/weaken links, compress notes)."""
+    system = get_learning_system()
+    await system.initialize()
+
+    async def run_consolidation():
+        return await system.zettelkasten.sleep_consolidation()
+
+    background_tasks.add_task(run_consolidation)
+    return {"status": "started", "message": "Sleep consolidation running in background"}
+
+
+@router.get("/zettelkasten/stats")
+async def zettelkasten_stats():
+    """Get Zettelkasten statistics."""
+    system = get_learning_system()
+    await system.initialize()
+
+    return await system.zettelkasten.get_stats()
+
+
+# =========================================================================
+# Research API Endpoints (for Multi-Agent Async Queries)
+# =========================================================================
+
+@router.post("/research/query")
+async def submit_research_query(request: ResearchQueryRequest):
+    """Submit an async research query (for agents working in parallel)."""
+    from .research_api import QueryPriority
+    system = get_learning_system()
+    await system.initialize()
+
+    try:
+        priority = QueryPriority(request.priority)
+    except ValueError:
+        priority = QueryPriority.NORMAL
+
+    query_id = await system.research_api.submit_query(
+        query=request.query,
+        agent_id=request.agent_id,
+        priority=priority,
+        expand_graph=request.expand_graph,
+        graph_depth=request.graph_depth,
+        max_results=request.max_results
+    )
+
+    return {"query_id": query_id, "status": "submitted"}
+
+
+@router.get("/research/result/{query_id}")
+async def get_research_result(query_id: str, wait: bool = False, timeout: float = 30.0):
+    """Get the result of a research query."""
+    system = get_learning_system()
+    await system.initialize()
+
+    return await system.research_api.get_result(query_id, wait=wait, timeout=timeout)
+
+
+@router.get("/research/pending")
+async def get_pending_queries(agent_id: Optional[str] = None):
+    """Get pending research queries."""
+    system = get_learning_system()
+    await system.initialize()
+
+    queries = await system.research_api.get_pending_queries(agent_id)
+    return {"queries": queries, "count": len(queries)}
+
+
+@router.get("/research/stats")
+async def research_stats():
+    """Get Research API statistics."""
+    system = get_learning_system()
+    await system.initialize()
+
+    return await system.research_api.get_stats()
+
+
+# =========================================================================
+# Multi-Agent A2A Protocol Endpoints
+# =========================================================================
+
+class A2ATaskRequest(BaseModel):
+    """Request from one agent to another to perform a task."""
+    from_agent: str
+    to_agent: str
+    task_type: str  # research, code, creative, general
+    task_description: str
+    context: Optional[Dict[str, Any]] = None
+    priority: str = "normal"
+    callback_url: Optional[str] = None  # URL to call when task completes
+
+
+class A2ATaskResponse(BaseModel):
+    """Response for a completed task."""
+    task_id: str
+    status: str  # pending, in_progress, completed, failed
+    result: Optional[Dict[str, Any]] = None
+    error: Optional[str] = None
+
+
+class A2AHeartbeat(BaseModel):
+    """Agent heartbeat for health monitoring."""
+    agent_id: str
+    status: str  # online, busy, idle
+    current_task: Optional[str] = None
+    capabilities: List[str] = []
+    load: float = 0.0  # 0.0 to 1.0
+
+
+@router.post("/a2a/task")
+async def submit_a2a_task(request: A2ATaskRequest, background_tasks: BackgroundTasks):
+    """
+    Submit a task from one agent to another.
+    Used for cross-agent collaboration (e.g., MarunochiAI asks BenchAI for research).
+    """
+    import uuid
+    system = get_learning_system()
+    await system.initialize()
+
+    task_id = f"a2a-{uuid.uuid4().hex[:12]}"
+
+    # Store task in memory for tracking
+    await system.memory.add(
+        content=f"A2A Task from {request.from_agent} to {request.to_agent}: {request.task_description}",
+        memory_type="agent",
+        category="a2a_task",
+        importance=4,
+        source=request.from_agent,
+        metadata={
+            "task_id": task_id,
+            "to_agent": request.to_agent,
+            "task_type": request.task_type,
+            "priority": request.priority,
+            "callback_url": request.callback_url
+        }
+    )
+
+    # If task is for BenchAI (research), process it
+    if request.to_agent.lower() == "benchai" and request.task_type == "research":
+        query_id = await system.research_api.submit_query(
+            query=request.task_description,
+            agent_id=request.from_agent,
+            priority=QueryPriority(request.priority) if request.priority in ["critical", "high", "normal", "low"] else QueryPriority.NORMAL,
+            expand_graph=True,
+            graph_depth=3,
+            max_results=15
+        )
+        return {
+            "task_id": task_id,
+            "status": "processing",
+            "research_query_id": query_id,
+            "message": f"Research task queued. Check /research/result/{query_id} for results."
+        }
+
+    return {
+        "task_id": task_id,
+        "status": "pending",
+        "message": f"Task submitted to {request.to_agent}"
+    }
+
+
+@router.post("/a2a/heartbeat")
+async def agent_heartbeat(request: A2AHeartbeat):
+    """
+    Receive heartbeat from an agent to update its status.
+    Call this every 30 seconds from each agent.
+    """
+    system = get_learning_system()
+    await system.initialize()
+
+    # Update agent status
+    await system.update_agent_status(request.agent_id, request.status)
+
+    # Store heartbeat data
+    await system.memory.add(
+        content=f"Heartbeat from {request.agent_id}: {request.status}, load: {request.load}",
+        memory_type="agent",
+        category="heartbeat",
+        importance=1,
+        source=request.agent_id,
+        metadata={
+            "status": request.status,
+            "load": request.load,
+            "current_task": request.current_task,
+            "capabilities": request.capabilities
+        }
+    )
+
+    return {"received": True, "timestamp": datetime.now().isoformat()}
+
+
+@router.get("/a2a/discover")
+async def discover_agents():
+    """
+    Discover available agents and their capabilities.
+    Used by agents to find other agents they can collaborate with.
+    """
+    system = get_learning_system()
+    await system.initialize()
+
+    agents = await system.get_agents()
+
+    return {
+        "agents": agents,
+        "count": len(agents),
+        "orchestrator": {
+            "id": "benchai",
+            "endpoint": "http://localhost:8085",
+            "capabilities": ["research", "memory", "rag", "zettelkasten", "training"]
+        }
+    }
+
+
+@router.post("/a2a/broadcast")
+async def broadcast_message(
+    message: str,
+    from_agent: str,
+    category: str = "broadcast"
+):
+    """
+    Broadcast a message to all agents.
+    Useful for announcing state changes, new capabilities, etc.
+    """
+    system = get_learning_system()
+    await system.initialize()
+
+    # Store in shared context
+    context_id = await system.share_context(
+        content=message,
+        from_agent=from_agent,
+        category=category
+    )
+
+    return {
+        "context_id": context_id,
+        "message": "Broadcast stored",
+        "from": from_agent
+    }
+
+
+@router.get("/a2a/messages")
+async def get_agent_messages(
+    agent_id: Optional[str] = None,
+    since_minutes: int = Query(60, ge=1, le=1440)
+):
+    """
+    Get recent messages/context shared between agents.
+    """
+    system = get_learning_system()
+    await system.initialize()
+
+    contexts = await system.get_shared_context(agent_id=agent_id)
+
+    return {
+        "messages": contexts,
+        "count": len(contexts)
+    }
+
+
+# Import for A2A
+from datetime import datetime
+from .research_api import QueryPriority

@@ -373,6 +373,43 @@ class ZettelkastenKnowledgeGraph:
         print(f"[ZETTELKASTEN] Created Zettel: {zettel_id} ({title})")
         return zettel_id
 
+    async def get_zettel(self, zettel_id: str) -> Optional[Dict]:
+        """Get a specific Zettel by ID."""
+        await self.initialize()
+
+        async with aiosqlite.connect(self.db_path) as db:
+            await self._optimize_connection(db)
+            db.row_factory = aiosqlite.Row
+
+            cursor = await db.execute(
+                "SELECT * FROM zettels WHERE id = ?",
+                (zettel_id,)
+            )
+            row = await cursor.fetchone()
+
+            if not row:
+                return None
+
+            # Get links
+            link_cursor = await db.execute('''
+                SELECT target_id, link_type, strength FROM links WHERE source_id = ?
+            ''', (zettel_id,))
+            links = [{"target": r["target_id"], "type": r["link_type"], "strength": r["strength"]}
+                     async for r in link_cursor]
+
+            return {
+                "id": row["id"],
+                "title": row["title"],
+                "content": row["content"],
+                "zettel_type": row["zettel_type"],
+                "keywords": json.loads(row["keywords"]) if row["keywords"] else [],
+                "tags": json.loads(row["tags"]) if row["tags"] else [],
+                "importance": row["importance"],
+                "created_at": row["created_at"],
+                "links": links,
+                "access_count": row["access_count"]
+            }
+
     def _extract_keywords(self, content: str) -> List[str]:
         """Extract keywords from content (simple implementation)."""
         # In production, use LLM or NLP library
