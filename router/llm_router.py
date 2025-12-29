@@ -269,6 +269,19 @@ MODELS = {
         "capabilities": ["vision", "ocr", "image_analysis"],
         "quality": 8,
         "speed": 6
+    },
+    "math": {
+        "name": "DeepSeek-Math 7B",
+        "file": "/media/data/llm-models/deepseek-math-7b-instruct.Q4_K_M.gguf",
+        "port": 8095,
+        "gpu_layers": 35,
+        "context": 4096,
+        "template": "chatml",  # DeepSeek uses ChatML format
+        "description": "Specialized math/STEM reasoning (GSM8K 82.9%)",
+        "role": "mathematician",
+        "capabilities": ["math", "reasoning", "proofs", "equations", "statistics", "calculus"],
+        "quality": 9,
+        "speed": 7
     }
 }
 
@@ -493,6 +506,26 @@ MEMORY_PATTERNS = re.compile(
     r'\b(remember|recall|forgot|forget|what did I|previously|last time|'
     r'you told me|I told you|my name is|I prefer|I like|I hate|'
     r'save this|note this|keep in mind)\b',
+    re.IGNORECASE
+)
+
+PDF_PATTERNS = re.compile(
+    r'\b(read|analyze|summarize|extract|parse|open|check|look at|review)\s*(this|the|my)?\s*'
+    r'(pdf|document|file)?\b.*\.pdf|'
+    r'\.pdf\b|'
+    r'\b(pdf|document)\s*(content|text|summary|analysis)\b',
+    re.IGNORECASE
+)
+
+MATH_PATTERNS = re.compile(
+    r'\b(calculate|compute|solve|equation|integral|derivative|matrix|'
+    r'algebra|calculus|statistics|probability|theorem|proof|'
+    r'sin|cos|tan|log|sqrt|factorial|permutation|combination|'
+    r'arithmetic|geometry|trigonometry|polynomial|quadratic|linear|'
+    r'fraction|decimal|percentage|ratio|proportion|'
+    r'what is \d+\s*[\+\-\*\/\^]\s*\d+|'
+    r'\d+\s*[\+\-\*\/\^x]\s*\d+.*=|'
+    r'find (x|y|the value)|evaluate|simplify)\b',
     re.IGNORECASE
 )
 
@@ -1389,13 +1422,21 @@ class ModelManager:
         # Use more threads for CPU mode
         threads = 8 if use_gpu else 12
 
+        # Handle both absolute and relative model paths
+        model_path = Path(config["file"])
+        if not model_path.is_absolute():
+            model_path = MODELS_DIR / config["file"]
+
         cmd = [
-            str(LLAMA_SERVER), "-m", str(MODELS_DIR / config["file"]),
+            str(LLAMA_SERVER), "-m", str(model_path),
             "--host", "127.0.0.1", "--port", str(config["port"]),
             "-ngl", str(gpu_layers), "-c", str(config["context"]),
             "-t", str(threads), "--slot-save-path", str(cache_dir),
             "--cont-batching", "-b", "512", "-ub", "256"
         ]
+        # Add chat template if specified
+        if "template" in config:
+            cmd.extend(["--chat-template", config["template"]])
         # Add flash attention for GPU mode (better memory efficiency)
         if use_gpu and gpu_layers > 0:
             cmd.extend(["--flash-attn", "on"])
@@ -2367,12 +2408,15 @@ async def execute_file_read(file_path: str) -> str:
     if not path.is_file():
         return f"Not a file: {file_path}"
 
-    if path.stat().st_size > 100 * 1024:
-        return f"File too large (>100KB). Consider reading specific sections."
+    file_size = path.stat().st_size
+    suffix = path.suffix.lower()
+
+    # PDFs can be larger (up to 10MB), other files 100KB
+    max_size = 10 * 1024 * 1024 if suffix == '.pdf' else 100 * 1024
+    if file_size > max_size:
+        return f"File too large ({file_size // 1024}KB > {max_size // 1024}KB limit)."
 
     try:
-        suffix = path.suffix.lower()
-
         if suffix == '.pdf':
             try:
                 result = subprocess.run(
@@ -4367,11 +4411,13 @@ def detect_intent(query: str, has_image: bool) -> str:
     if has_image:
         return "vision"
     if MATH_PATTERNS.search(query):
-        return "code"
+        return "code"  # Qwen2.5-Coder has strong math capabilities (route to code for now)
     if CODE_PATTERNS.search(query):
         return "code"
     if MEMORY_PATTERNS.search(query):
         return "memory"
+    if PDF_PATTERNS.search(query):
+        return "pdf"  # PDF analysis
     if RESEARCH_PATTERNS.search(query):
         return "research"
 
@@ -5641,7 +5687,60 @@ async def chat_completions(request: ChatRequest):
         request_cache.set(request.model, messages_dicts, request.max_tokens, response)
         return response
 
-    # Agentic Plan & Execute
+    # Fast-path: Use intent detection to skip slow planner for simple queries
+    intent = detect_intent(text_query, has_image)
+    complexity = complexity_score(text_query)
+
+    # Simple queries (complexity < 0.4) get fast-routed without planner
+    if complexity < 0.4 and intent in ["general", "code", "research"]:
+        print(f"[FAST-ROUTE] Simple query (complexity={complexity:.2f}) → {intent}")
+        target_model = "code" if intent == "code" else "general"
+
+        if request.stream:
+            async def fast_stream():
+                async for chunk in execute_reasoning_stream(messages_dicts, target_model):
+                    yield f"data: {json.dumps({'choices': [{'delta': {'content': chunk}}]})}\n\n"
+                yield "data: [DONE]\n\n"
+            return StreamingResponse(fast_stream(), media_type="text/event-stream")
+
+        ans = await execute_reasoning(messages_dicts, target_model)
+        return {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": f"auto-{target_model}",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": ans}, "finish_reason": "stop"}]
+        }
+
+    # PDF intent: Extract path and analyze
+    if intent == "pdf":
+        print(f"[FAST-ROUTE] PDF query detected")
+        # Extract file path from query
+        import re
+        path_match = re.search(r'[/~][\w/\-._]+\.pdf', text_query, re.IGNORECASE)
+        if path_match:
+            pdf_path = path_match.group(0)
+            print(f"[PDF] Analyzing: {pdf_path}")
+            pdf_content = await execute_file_read(pdf_path)
+            if "not found" in pdf_content.lower() or "error" in pdf_content.lower():
+                ans = pdf_content
+            else:
+                # Use code model to analyze PDF content
+                prompt = f"The user asked: {text_query}\n\nPDF Content:\n{pdf_content[:15000]}\n\nProvide a helpful response based on the PDF."
+                ans = await execute_reasoning([{"role": "user", "content": prompt}], "code")
+        else:
+            ans = "I detected a PDF-related request but couldn't find a file path. Please specify the full path to the PDF file (e.g., /path/to/document.pdf)"
+
+        return {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": "auto-pdf",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": ans}, "finish_reason": "stop"}]
+        }
+
+    # Complex queries: Agentic Plan & Execute
+    print(f"[AGENT-MODE] Complex query (complexity={complexity:.2f}, intent={intent}) → planner")
     session_context = session_manager.get_context_for_planner(session_id)
     plan = await generate_plan(text_query, has_image, session_context)
     print(f"[PLAN] {json.dumps(plan, indent=2)}")
@@ -7257,6 +7356,192 @@ async def search_rag(q: str = Query(...), n: int = 3):
 async def rag_stats():
     return rag_manager.get_stats()
 
+
+# --- PDF Analysis Endpoint ---
+
+class PDFAnalyzeRequest(BaseModel):
+    file_path: str
+    action: str = "extract"  # extract, summarize, analyze, index
+    query: Optional[str] = None  # For analyze action
+
+@app.post("/v1/pdf/analyze")
+async def analyze_pdf(request: PDFAnalyzeRequest):
+    """
+    Analyze a PDF file.
+    Actions:
+    - extract: Just extract text
+    - summarize: Extract and summarize with LLM
+    - analyze: Extract and answer a specific query about it
+    - index: Extract and add to RAG for future recall
+    """
+    from pathlib import Path
+    import subprocess
+
+    path = Path(request.file_path).expanduser()
+
+    if not path.exists():
+        raise HTTPException(404, f"File not found: {request.file_path}")
+
+    if path.suffix.lower() != '.pdf':
+        raise HTTPException(400, "File must be a PDF")
+
+    file_size = path.stat().st_size
+    if file_size > 50 * 1024 * 1024:  # 50MB limit
+        raise HTTPException(400, f"PDF too large ({file_size // (1024*1024)}MB > 50MB limit)")
+
+    # Extract text
+    try:
+        result = subprocess.run(
+            ["pdftotext", "-layout", str(path), "-"],
+            capture_output=True, text=True, timeout=60
+        )
+        if result.returncode != 0:
+            raise HTTPException(500, f"PDF extraction failed: {result.stderr}")
+        text = result.stdout
+    except FileNotFoundError:
+        raise HTTPException(500, "pdftotext not installed")
+    except subprocess.TimeoutExpired:
+        raise HTTPException(500, "PDF extraction timed out")
+
+    if not text.strip():
+        return {"status": "empty", "message": "PDF appears to be image-only (no extractable text)", "suggestion": "Use OCR or vision model"}
+
+    # Truncate for LLM processing
+    max_chars = 30000
+    text_for_llm = text[:max_chars] + ("..." if len(text) > max_chars else "")
+
+    response = {
+        "file": path.name,
+        "size_kb": file_size // 1024,
+        "text_length": len(text),
+        "action": request.action
+    }
+
+    if request.action == "extract":
+        response["text"] = text[:50000]  # Return first 50K chars
+        response["truncated"] = len(text) > 50000
+
+    elif request.action == "summarize":
+        prompt = f"Summarize this document concisely:\n\n{text_for_llm}"
+        summary = await execute_reasoning([{"role": "user", "content": prompt}], "general")
+        response["summary"] = summary
+        # Store in memory
+        await memory_manager.add_memory(
+            f"[PDF Summary: {path.name}] {summary[:500]}",
+            category="document",
+            importance=3
+        )
+
+    elif request.action == "analyze":
+        if not request.query:
+            raise HTTPException(400, "Query required for analyze action")
+        prompt = f"Based on this document, answer: {request.query}\n\nDocument:\n{text_for_llm}"
+        analysis = await execute_reasoning([{"role": "user", "content": prompt}], "code")
+        response["analysis"] = analysis
+        response["query"] = request.query
+
+    elif request.action == "index":
+        # Add to RAG in chunks
+        chunk_size = 2000
+        chunks = [text[i:i+chunk_size] for i in range(0, len(text), chunk_size)]
+        indexed = 0
+        for i, chunk in enumerate(chunks[:50]):  # Max 50 chunks
+            await rag_manager.add_document(
+                chunk,
+                {"source": str(path), "chunk": i, "type": "pdf"}
+            )
+            indexed += 1
+        response["indexed_chunks"] = indexed
+        response["message"] = f"Indexed {indexed} chunks from {path.name}"
+        # Also store summary in memory
+        summary_prompt = f"Summarize this document in 2-3 sentences:\n\n{text_for_llm}"
+        summary = await execute_reasoning([{"role": "user", "content": summary_prompt}], "general")
+        await memory_manager.add_memory(
+            f"[PDF Indexed: {path.name}] {summary}",
+            category="document",
+            importance=4
+        )
+
+    return response
+
+
+# --- Background Task Queue Endpoints ---
+
+from task_queue import task_queue, TaskPriority, register_default_handlers
+
+class TaskSubmitRequest(BaseModel):
+    task_type: str  # research, index, memory, agent
+    payload: Dict
+    priority: Optional[str] = "normal"  # low, normal, high, urgent
+    callback_url: Optional[str] = None
+
+# Task queue initialization flag
+_task_queue_initialized = False
+
+async def ensure_task_queue():
+    """Ensure task queue is initialized (lazy init on first use)."""
+    global _task_queue_initialized
+    if not _task_queue_initialized:
+        register_default_handlers()
+        await task_queue.start()
+        _task_queue_initialized = True
+        print("[TASK-QUEUE] Background task queue initialized")
+
+@app.post("/v1/tasks/submit")
+async def submit_task(request: TaskSubmitRequest):
+    """Submit a background task."""
+    await ensure_task_queue()
+    priority_map = {
+        "low": TaskPriority.LOW,
+        "normal": TaskPriority.NORMAL,
+        "high": TaskPriority.HIGH,
+        "urgent": TaskPriority.URGENT
+    }
+    priority = priority_map.get(request.priority, TaskPriority.NORMAL)
+
+    task_id = await task_queue.submit(
+        task_type=request.task_type,
+        payload=request.payload,
+        priority=priority,
+        callback_url=request.callback_url
+    )
+
+    return {"task_id": task_id, "status": "submitted"}
+
+@app.get("/v1/tasks/stats")
+async def task_stats():
+    """Get task queue statistics."""
+    await ensure_task_queue()
+    return task_queue.stats()
+
+@app.get("/v1/tasks")
+async def list_tasks(status: Optional[str] = None, limit: int = 50):
+    """List tasks."""
+    from task_queue import TaskStatus
+    status_enum = None
+    if status:
+        try:
+            status_enum = TaskStatus(status)
+        except ValueError:
+            pass
+    return await task_queue.list_tasks(status=status_enum, limit=limit)
+
+@app.get("/v1/tasks/{task_id}")
+async def get_task(task_id: str, wait: bool = False, timeout: float = 60):
+    """Get task status/result."""
+    result = await task_queue.get_result(task_id, wait=wait, timeout=timeout)
+    if not result:
+        raise HTTPException(404, f"Task not found: {task_id}")
+    return result
+
+@app.delete("/v1/tasks/{task_id}")
+async def cancel_task(task_id: str):
+    """Cancel a pending task."""
+    success = await task_queue.cancel(task_id)
+    return {"cancelled": success}
+
+
 if __name__ == "__main__":
     import uvicorn
+    # Task queue will be started by the @app.on_event("startup") handler
     uvicorn.run(app, host="0.0.0.0", port=8085)

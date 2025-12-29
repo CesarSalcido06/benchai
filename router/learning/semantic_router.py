@@ -56,6 +56,90 @@ async def check_marunochi_health() -> bool:
     return False
 
 
+async def check_dottscavis_health() -> bool:
+    """Check if DottscavisAI is available."""
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                "http://dottscavisai.local:8766/health",
+                timeout=aiohttp.ClientTimeout(total=2)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get("status") == "ok"
+    except Exception:
+        pass
+    return False
+
+
+async def call_dottscavis_task(task_type: str, description: str, context: Dict = None) -> Optional[Dict]:
+    """
+    Send a task to DottscavisAI via A2A protocol.
+
+    Args:
+        task_type: vision, image_gen, tts, etc.
+        description: Task description
+        context: Additional context (image base64, etc.)
+
+    Returns:
+        Task result or None if unavailable
+    """
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                "http://dottscavisai.local:8766/v1/a2a/task",
+                json={
+                    "from_agent": "benchai",
+                    "task_type": task_type,
+                    "task_description": description,
+                    "context": context or {},
+                    "priority": "normal"
+                },
+                timeout=aiohttp.ClientTimeout(total=120)  # Creative tasks can be slow
+            ) as resp:
+                if resp.status == 200:
+                    return await resp.json()
+    except Exception as e:
+        print(f"[A2A] DottscavisAI call failed: {e}")
+    return None
+
+
+async def call_dottscavis_vision(image_b64: str, prompt: str) -> Optional[str]:
+    """Analyze an image using DottscavisAI."""
+    result = await call_dottscavis_task(
+        task_type="vision",
+        description=prompt,
+        context={"image": image_b64}
+    )
+    if result and result.get("status") == "completed":
+        return result.get("result")
+    return None
+
+
+async def call_dottscavis_image_gen(prompt: str, negative_prompt: str = "") -> Optional[str]:
+    """Generate an image using DottscavisAI."""
+    result = await call_dottscavis_task(
+        task_type="image_gen",
+        description=prompt,
+        context={"negative_prompt": negative_prompt}
+    )
+    if result and result.get("status") == "completed":
+        return result.get("result")  # Returns file path or base64
+    return None
+
+
+async def call_dottscavis_tts(text: str, voice: str = "en_US-lessac-medium") -> Optional[str]:
+    """Convert text to speech using DottscavisAI."""
+    result = await call_dottscavis_task(
+        task_type="tts",
+        description=text,
+        context={"voice": voice}
+    )
+    if result and result.get("status") == "completed":
+        return result.get("result")  # Returns audio file path
+    return None
+
+
 class TaskDomain(Enum):
     """High-level task domains for routing."""
     RESEARCH = "research"
@@ -158,13 +242,23 @@ AGENT_CAPABILITIES = {
     "dottscavisAI": {
         "domains": [TaskDomain.CREATIVE],
         "capabilities": [
-            "image_generation", "video_editing", "3d_modeling",
-            "audio_processing", "animation", "compositing"
+            "image_generation", "vision_analysis", "tts", "audio_processing",
+            "video_editing", "3d_modeling", "animation", "compositing", "ocr"
         ],
         "keywords": [
-            "generate image", "create video", "3d model", "render",
-            "animation", "visual", "audio", "transcribe", "voice"
+            "generate image", "create picture", "draw", "render", "stable diffusion",
+            "analyze image", "describe image", "what is in this image", "vision",
+            "text to speech", "speak", "read aloud", "tts", "voice",
+            "create video", "3d model", "animation", "visual", "audio",
+            "transcribe", "ocr", "extract text from image"
         ],
+        "endpoints": {
+            "chat": "http://dottscavisai.local:8766/v1/chat/completions",
+            "vision": "http://dottscavisai.local:8766/v1/vision/analyze",
+            "image_gen": "http://dottscavisai.local:8766/v1/images/generate",
+            "tts": "http://dottscavisai.local:8766/v1/audio/speech",
+            "a2a_task": "http://dottscavisai.local:8766/v1/a2a/task"
+        },
         "always_available": False,
         "priority": 0.95  # Very high for creative tasks
     }
