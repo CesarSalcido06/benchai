@@ -529,6 +529,20 @@ MATH_PATTERNS = re.compile(
     re.IGNORECASE
 )
 
+# Factual queries that MUST use web search (product specs, comparisons, current info)
+FACTUAL_PATTERNS = re.compile(
+    r'\b(specs|specifications|price|cost|release date|dimensions|weight|'
+    r'compare|comparison|vs\.?|versus|difference between|'
+    r'iphone|samsung|google pixel|android|macbook|laptop|'
+    r'cpu|gpu|processor|ram|storage|battery|screen size|display|'
+    r'how much does|what is the price|when was .* released|'
+    r'features of|what are the .* specs|'
+    r'current|latest|newest|2024|2025|'
+    r'better than|worse than|faster than|cheaper than|'
+    r'which is better|which should I|recommend)\b',
+    re.IGNORECASE
+)
+
 META_PATTERNS = re.compile(
     r'^(Suggest\s+\d+|Generate\s+a\s+(brief\s+)?title|Create\s+tags|Provide\s+follow-up)',
     re.IGNORECASE
@@ -788,6 +802,35 @@ class MemoryManager:
             )
             await db.commit()
 
+    async def get_recent_conversations(self, limit: int = 10) -> List[Dict]:
+        """Get recent conversation history for context injection."""
+        await self.initialize()
+        async with aiosqlite.connect(self.db_path) as db:
+            db.row_factory = aiosqlite.Row
+            cursor = await db.execute(
+                "SELECT role, content, created_at FROM conversations ORDER BY created_at DESC LIMIT ?",
+                (limit,)
+            )
+            rows = await cursor.fetchall()
+            # Return in chronological order (oldest first)
+            return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
+
+    async def get_conversation_context(self, limit: int = 6) -> str:
+        """Get formatted conversation history for prompt injection."""
+        conversations = await self.get_recent_conversations(limit)
+        if not conversations:
+            return ""
+
+        context_parts = ["[Recent Conversation History]"]
+        for conv in conversations:
+            role = conv["role"].upper()
+            content = conv["content"][:300]  # Limit each message
+            if len(conv["content"]) > 300:
+                content += "..."
+            context_parts.append(f"{role}: {content}")
+
+        return "\n".join(context_parts)
+
 memory_manager = MemoryManager(DB_PATH)
 
 # --- RAG MANAGER (ChromaDB) ---
@@ -1002,24 +1045,44 @@ class SessionManager:
         self.session_ttl = session_ttl  # 1 hour default
 
     def _get_session_id(self, messages: List[Dict]) -> str:
-        """Generate session ID from conversation - use hash of ALL messages for uniqueness."""
-        # For multi-turn conversations, hash ALL messages to avoid session collision
-        # Single-turn requests (IDE) will get unique sessions per request
-        if messages and len(messages) > 0:
-            # Collect all message content for unique hash
-            all_content = []
-            for msg in messages:
-                role = msg.get("role", "")
-                content = msg.get("content", "")
-                if isinstance(content, list):
-                    # Handle multimodal content
-                    text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
-                    content = " ".join(text_parts)
-                all_content.append(f"{role}:{content}")
+        """Generate STABLE session ID from conversation context.
 
-            # Hash the full conversation for unique session ID
-            full_hash = hashlib.sha256("|||".join(all_content).encode()).hexdigest()[:16]
-            return full_hash
+        Uses the first few messages (system + first user) as anchor for stability.
+        This ensures follow-up messages in the same conversation use the same session.
+        """
+        if messages and len(messages) > 0:
+            # Strategy: Use first system message + first user message as stable anchor
+            # This way, follow-up messages in the same conversation get the same session
+            anchor_content = []
+
+            # Find first system message (usually contains conversation context/instructions)
+            for msg in messages:
+                if msg.get("role") == "system":
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                        content = " ".join(text_parts)
+                    # Use first 500 chars of system message as anchor
+                    anchor_content.append(f"sys:{content[:500]}")
+                    break
+
+            # Find first user message
+            for msg in messages:
+                if msg.get("role") == "user":
+                    content = msg.get("content", "")
+                    if isinstance(content, list):
+                        text_parts = [p.get("text", "") for p in content if isinstance(p, dict) and p.get("type") == "text"]
+                        content = " ".join(text_parts)
+                    # Use first 200 chars of first user message as anchor
+                    anchor_content.append(f"usr:{content[:200]}")
+                    break
+
+            if anchor_content:
+                # Hash the stable anchor for session ID
+                stable_hash = hashlib.sha256("|||".join(anchor_content).encode()).hexdigest()[:16]
+                return stable_hash
+
+        # Fallback: time-based session for single messages
         return hashlib.sha256(str(time.time()).encode()).hexdigest()[:16]
 
     def get_or_create_session(self, messages: List[Dict]) -> tuple:
@@ -2011,6 +2074,201 @@ Return ONLY the complete code, no explanations before or after.
         return f"Code generation error: {str(e)}"
     finally:
         semaphore.release()
+
+
+# --- MULTI-AGENT ORCHESTRATION TOOLS ---
+
+async def execute_agent_code(task: str, language: str = "python") -> str:
+    """
+    Intelligent code generation that routes to the best available agent.
+
+    1. First tries MarunochiAI (M4 Mac) for high-quality code
+    2. Falls back to local DeepSeek with enhanced context if MarunochiAI is offline
+    3. Always enriches with relevant research from BenchAI's memory
+    """
+    print(f"[AGENT:CODE] Task: {task[:100]}... Language: {language}")
+
+    # Get relevant context from memory and Zettelkasten
+    context_parts = []
+
+    try:
+        # Search memory for related experiences
+        if LEARNING_AVAILABLE:
+            experiences = await get_experience_context(task, domain="coding")
+            if experiences:
+                context_parts.append(f"**Relevant Past Experiences:**\n{experiences}")
+
+        # Search RAG for related code/docs
+        if QDRANT_AVAILABLE:
+            rag_results = await qdrant_manager.search(task, n_results=3)
+            if rag_results:
+                rag_context = "\n".join([r.get('content', '')[:300] for r in rag_results[:3]])
+                context_parts.append(f"**Related Documentation:**\n{rag_context}")
+    except Exception as e:
+        print(f"[AGENT:CODE] Context gathering failed: {e}")
+
+    enhanced_context = "\n\n".join(context_parts) if context_parts else ""
+
+    # Try MarunochiAI first
+    from router.learning.semantic_router import check_marunochi_health
+
+    marunochi_available = await check_marunochi_health()
+
+    if marunochi_available:
+        print("[AGENT:CODE] MarunochiAI available - routing to M4 Mac")
+        try:
+            async with httpx.AsyncClient(timeout=120.0) as client:
+                # Include BenchAI context in the request
+                enhanced_task = f"{task}\n\n**Context from BenchAI:**\n{enhanced_context}" if enhanced_context else task
+
+                resp = await client.post(
+                    "http://localhost:8765/v1/chat/completions",
+                    json={
+                        "messages": [
+                            {"role": "system", "content": f"You are an expert {language} programmer. Write clean, efficient, well-documented code."},
+                            {"role": "user", "content": enhanced_task}
+                        ],
+                        "max_tokens": 2048,
+                        "temperature": 0.3
+                    }
+                )
+
+                if resp.status_code == 200:
+                    result = resp.json()
+                    code = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+                    # Record experience for learning
+                    if LEARNING_AVAILABLE and code:
+                        try:
+                            await remember_important(
+                                f"[MarunochiAI Code] Task: {task[:100]} Language: {language}",
+                                domain="coding",
+                                importance=3
+                            )
+                        except:
+                            pass
+
+                    return f"**Generated by MarunochiAI (M4 Mac):**\n\n{code}"
+
+        except Exception as e:
+            print(f"[AGENT:CODE] MarunochiAI call failed: {e}")
+
+    # Fallback to local DeepSeek with enhanced context
+    print("[AGENT:CODE] MarunochiAI offline - using local DeepSeek with enhanced context")
+
+    # Enhance the task with our gathered context
+    full_task = f"{task}\n\n{enhanced_context}" if enhanced_context else task
+
+    result = await execute_code_task(full_task, language)
+
+    return f"**Generated locally (MarunochiAI offline):**\n\n{result}"
+
+
+async def execute_deep_research(query: str) -> str:
+    """
+    Comprehensive research that:
+    1. Searches the web for current information
+    2. Searches memory for related past research
+    3. Searches Zettelkasten for connected concepts
+    4. Synthesizes findings
+    5. Stores results in Zettelkasten with proper connections
+    """
+    print(f"[DEEP_RESEARCH] Query: {query[:100]}...")
+
+    results = {
+        "web": "",
+        "memory": "",
+        "zettelkasten": "",
+        "rag": ""
+    }
+
+    # 1. Web search for current information
+    try:
+        results["web"] = await execute_web_search(query)
+    except Exception as e:
+        print(f"[DEEP_RESEARCH] Web search failed: {e}")
+
+    # 2. Search memory for related research
+    try:
+        if LEARNING_AVAILABLE:
+            memories = await recall_relevant(query, limit=5)
+            if memories:
+                results["memory"] = "\n".join([m.get('content', '')[:300] for m in memories])
+    except Exception as e:
+        print(f"[DEEP_RESEARCH] Memory search failed: {e}")
+
+    # 3. Search Zettelkasten for connected concepts
+    try:
+        if LEARNING_AVAILABLE:
+            zk_results = await zettel_search(query, limit=5)
+            if zk_results:
+                results["zettelkasten"] = "\n".join([z.get('content', '')[:300] for z in zk_results])
+    except Exception as e:
+        print(f"[DEEP_RESEARCH] Zettelkasten search failed: {e}")
+
+    # 4. Search RAG for related documents
+    try:
+        if QDRANT_AVAILABLE:
+            rag_results = await qdrant_manager.search(query, n_results=5)
+            if rag_results:
+                results["rag"] = "\n".join([r.get('content', '')[:300] for r in rag_results])
+    except Exception as e:
+        print(f"[DEEP_RESEARCH] RAG search failed: {e}")
+
+    # 5. Synthesize all findings
+    synthesis_prompt = f"""Synthesize the following research findings into a comprehensive, well-organized response.
+
+**Research Query:** {query}
+
+**Web Search Results:**
+{results["web"] if results["web"] else "No web results available"}
+
+**Previous Research (Memory):**
+{results["memory"] if results["memory"] else "No related memories found"}
+
+**Knowledge Graph (Zettelkasten):**
+{results["zettelkasten"] if results["zettelkasten"] else "No related concepts found"}
+
+**Document Search (RAG):**
+{results["rag"] if results["rag"] else "No related documents found"}
+
+Provide:
+1. **Summary** - Key findings from all sources
+2. **Details** - In-depth analysis with citations
+3. **Connections** - How this relates to existing knowledge
+4. **Gaps** - What information is missing or uncertain
+5. **Next Steps** - Suggested follow-up research"""
+
+    synthesis = await execute_reasoning([{"role": "user", "content": synthesis_prompt}], "research")
+
+    # 6. Store in Zettelkasten for future reference
+    try:
+        if LEARNING_AVAILABLE:
+            # Create a Zettelkasten entry
+            zettel_content = f"# Research: {query}\n\n{synthesis[:2000]}"
+
+            # Extract key concepts for tags
+            concepts = query.lower().split()[:5]
+
+            await create_zettel(
+                title=f"Research: {query[:50]}",
+                content=zettel_content,
+                tags=concepts,
+                source="deep_research"
+            )
+
+            # Also store in memory with high importance
+            await remember_important(
+                f"[Research] {query}: {synthesis[:500]}",
+                domain="research",
+                importance=5
+            )
+
+            print(f"[DEEP_RESEARCH] Stored in Zettelkasten and memory")
+    except Exception as e:
+        print(f"[DEEP_RESEARCH] Failed to store: {e}")
+
+    return f"**Deep Research Results:**\n\n{synthesis}"
 
 
 # --- ENGINEERING ASSISTANT TOOLS ---
@@ -4073,11 +4331,25 @@ async def generate_plan(user_query: str, has_image: bool, session_context: str =
 8. `reasoning(prompt)` - Think through problems, synthesize information
 9. `claude_assist(prompt, context)` - Call Claude (mastermind) for complex reasoning, code review, architectural decisions
 
-*Code Generation (uses DeepSeek Coder):*
-10. `code_task(task, language)` - Generate and run code. DeepSeek writes the code.
+*Multi-Agent Code Generation (prefers MarunochiAI when available):*
+10. `agent_code(task, language)` - Route to best available code agent with context enhancement
+   - First tries MarunochiAI (M4 Mac) for high-quality code
+   - Falls back to local DeepSeek with research context if MarunochiAI offline
    - Languages: python, cpp, c, cuda, javascript, typescript, rust, go
+   - Example: {{"tool": "agent_code", "args": {{"task": "implement async file watcher", "language": "python"}}}}
+   - **Use this for complex coding tasks that benefit from context!**
+11. `code_task(task, language)` - Local code generation (DeepSeek Coder)
+   - Use for simple, quick code tasks
    - Example: {{"tool": "code_task", "args": {{"task": "fibonacci sequence", "language": "cpp"}}}}
-11. `run_code(code)` - Execute user-provided Python code directly (no generation)
+12. `run_code(code)` - Execute user-provided Python code directly (no generation)
+
+*Research & Knowledge Storage:*
+13. `deep_research(query)` - Comprehensive research with web search + memory + Zettelkasten storage
+   - Automatically stores findings in knowledge graph
+   - Creates connections to related concepts
+   - Example: {{"tool": "deep_research", "args": "best practices for async Python programming"}}
+14. `zettel_create(title, content, tags, links)` - Create a Zettelkasten note with connections
+   - Example: {{"tool": "zettel_create", "args": {{"title": "Async Patterns", "content": "...", "tags": ["python", "async"], "links": ["coroutines", "event-loop"]}}}}
 
 *Engineering/Learning Tools (uses Claude when available):*
 12. `code_review(code, language, focus)` - Review code for issues and best practices
@@ -4477,6 +4749,21 @@ async def execute_parallel_steps(steps: List[Dict], messages_dicts: List[Dict], 
                 result = await execute_debug_info(args)
             elif tool == "run_cuda":
                 result = await execute_run_cuda(args)
+            elif tool == "agent_code":
+                # Multi-agent code generation with MarunochiAI fallback
+                if isinstance(args, dict):
+                    task = args.get("task", "")
+                    language = args.get("language", "python")
+                else:
+                    task = str(args)
+                    language = "python"
+                result = await execute_agent_code(task, language)
+
+            elif tool == "deep_research":
+                # Comprehensive research with Zettelkasten storage
+                query = args if isinstance(args, str) else args.get("query", str(args))
+                result = await execute_deep_research(query)
+
             elif tool == "code_task":
                 # args can be dict {"task": "...", "language": "..."} or string
                 if isinstance(args, dict):
@@ -5604,11 +5891,20 @@ async def chat_completions(request: ChatRequest):
     # Log conversation
     await memory_manager.log_conversation("user", text_query)
 
-    # --- LEARNING SYSTEM: Experience Context Injection ---
+    # --- CONTEXT INJECTION: Conversation History + Memory + Experience ---
+    # Always inject conversation history for context continuity (fixes the 3-chat context loss bug)
+    conversation_history = ""
+    try:
+        conversation_history = await memory_manager.get_conversation_context(limit=8)
+        if conversation_history:
+            print(f"[CONTEXT] Injecting {len(conversation_history)} chars of conversation history")
+    except Exception as e:
+        print(f"[CONTEXT] Failed to get conversation history: {e}")
+
     # Inject relevant past experiences for 15-20% performance boost
     experience_context = ""
     memory_context = ""
-    if LEARNING_AVAILABLE and len(text_query) > 50:  # Only for substantial queries
+    if LEARNING_AVAILABLE and len(text_query) > 20:  # Reduced threshold from 50 to 20
         try:
             # Get relevant experiences from past successes
             experience_context = await get_experience_context(text_query, domain="general")
@@ -5616,23 +5912,39 @@ async def chat_completions(request: ChatRequest):
             memories = await recall_relevant(text_query, limit=3)
             if memories:
                 memory_context = "\n".join([f"- {m.get('content', '')[:200]}" for m in memories[:3]])
-
-            # Inject into first system message if we have useful context
-            if experience_context or memory_context:
-                context_injection = ""
-                if experience_context:
-                    context_injection += f"\n\n## Relevant Past Experiences:\n{experience_context}"
-                if memory_context:
-                    context_injection += f"\n\n## Relevant Knowledge:\n{memory_context}"
-
-                # Find and enhance system message
-                for i, msg in enumerate(messages_dicts):
-                    if msg.get("role") == "system":
-                        messages_dicts[i]["content"] = msg["content"] + context_injection
-                        print(f"[LEARNING] Injected {len(experience_context)} chars experience + {len(memory_context)} chars memory")
-                        break
         except Exception as e:
-            print(f"[LEARNING] Experience injection skipped: {e}")
+            print(f"[LEARNING] Experience/memory retrieval failed: {e}")
+
+    # Inject context into first system message
+    if conversation_history or experience_context or memory_context:
+        context_injection = ""
+
+        # Add conversation history first (most important for context continuity)
+        if conversation_history:
+            context_injection += f"\n\n{conversation_history}"
+
+        if experience_context:
+            context_injection += f"\n\n## Relevant Past Experiences:\n{experience_context}"
+
+        if memory_context:
+            context_injection += f"\n\n## Relevant Knowledge:\n{memory_context}"
+
+        # Find and enhance system message
+        system_found = False
+        for i, msg in enumerate(messages_dicts):
+            if msg.get("role") == "system":
+                messages_dicts[i]["content"] = msg["content"] + context_injection
+                system_found = True
+                print(f"[CONTEXT] Injected: history={len(conversation_history)}, exp={len(experience_context)}, mem={len(memory_context)} chars")
+                break
+
+        # If no system message, create one with the context
+        if not system_found and context_injection:
+            messages_dicts.insert(0, {
+                "role": "system",
+                "content": f"You are a helpful AI assistant. Use the following context to provide better responses:{context_injection}"
+            })
+            print(f"[CONTEXT] Created system message with context")
 
     # Check for memory-related queries and auto-save
     if MEMORY_PATTERNS.search(text_query):
@@ -5690,6 +6002,45 @@ async def chat_completions(request: ChatRequest):
     # Fast-path: Use intent detection to skip slow planner for simple queries
     intent = detect_intent(text_query, has_image)
     complexity = complexity_score(text_query)
+
+    # FACTUAL QUERIES: Force web search for product specs, comparisons, current info
+    # This prevents hallucinations on queries like "iPhone 14 vs 15 Pro specs"
+    if FACTUAL_PATTERNS.search(text_query):
+        print(f"[FACTUAL] Detected factual query - forcing web search: {text_query[:100]}...")
+
+        # Perform web search first
+        search_results = await execute_web_search(text_query)
+
+        # Then synthesize with research model
+        synthesis_prompt = f"""Based on the following web search results, answer the user's question accurately.
+
+User Question: {text_query}
+
+Web Search Results:
+{search_results}
+
+Provide a comprehensive, factual answer based on the search results. Include specific details like specs, prices, dates, etc. If the search results don't contain enough information, say so clearly."""
+
+        ans = await execute_reasoning([{"role": "user", "content": synthesis_prompt}], "research")
+
+        # Store as important memory (research result)
+        if LEARNING_AVAILABLE:
+            try:
+                await remember_important(
+                    f"[Research] Q: {text_query[:200]} A: {ans[:500]}",
+                    domain="research",
+                    importance=4
+                )
+            except Exception as e:
+                print(f"[MEMORY] Failed to store research: {e}")
+
+        return {
+            "id": f"chatcmpl-{int(time.time())}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": "auto-research-websearch",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": ans}, "finish_reason": "stop"}]
+        }
 
     # Simple queries (complexity < 0.4) get fast-routed without planner
     if complexity < 0.4 and intent in ["general", "code", "research"]:
@@ -5873,6 +6224,29 @@ async def chat_completions(request: ChatRequest):
                 res = await execute_run_cuda(args)
                 context += f"\n\n**CUDA Execution:**\n{res}"
                 final_response += res
+
+            elif tool == "agent_code":
+                # Multi-agent code generation with MarunochiAI fallback
+                if isinstance(args, dict):
+                    task = args.get("task", "")
+                    language = args.get("language", "python")
+                else:
+                    task = str(args)
+                    language = "python"
+                # Include context from previous steps
+                full_task = f"{task}\n\nContext from previous analysis:\n{context}" if context else task
+                res = await execute_agent_code(full_task, language)
+                context += f"\n\n**Agent Code ({language}):**\n{res}"
+                final_response += res
+                session_manager.add_tool_result(session_id, "agent_code", res)
+
+            elif tool == "deep_research":
+                # Comprehensive research with Zettelkasten storage
+                query = args if isinstance(args, str) else args.get("query", str(args))
+                res = await execute_deep_research(query)
+                context += f"\n\n**Deep Research:**\n{res}"
+                final_response += res
+                session_manager.add_tool_result(session_id, "deep_research", res)
 
             elif tool == "code_task":
                 # args can be dict {"task": "...", "language": "..."} or string
