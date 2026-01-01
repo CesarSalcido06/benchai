@@ -3,9 +3,9 @@
 **Self-hosted AI orchestration platform for software engineering**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
-[![Version](https://img.shields.io/badge/version-3.0.0-green.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-3.5.0-green.svg)](CHANGELOG.md)
 
-BenchAI is a local LLM router that orchestrates multiple AI models for software engineering tasks. Run entirely on your hardware with zero API costs, full privacy, and complete customization.
+BenchAI is a local LLM router that orchestrates multiple AI models for software engineering tasks. Features multi-agent coordination (A2A protocol), persistent learning system, and optional Claude CLI integration. Run entirely on your hardware with zero API costs, full privacy, and complete customization.
 
 ---
 
@@ -13,14 +13,17 @@ BenchAI is a local LLM router that orchestrates multiple AI models for software 
 
 | Feature | Description |
 |---------|-------------|
-| **Multi-Model Routing** | Automatic selection between 4 specialized models |
+| **Multi-Model Routing** | Automatic selection between 6 specialized local models |
+| **Multi-Agent (A2A)** | Coordinate with remote agents (MarunochiAI, DottscavisAI) |
+| **Claude Integration** | Optional Claude CLI for complex reasoning (explicit trigger) |
 | **Agentic Planner** | Multi-step task orchestration with parallel tool execution |
+| **Learning System** | Zettelkasten knowledge graph + experience replay |
 | **88+ Tools** | Shell, Git, GitHub, Docker, file ops, web search, and more |
 | **Persistent Memory** | SQLite with FTS5 full-text search |
-| **RAG Pipeline** | ChromaDB vector database for codebase indexing |
+| **RAG Pipeline** | Qdrant vector database for codebase indexing |
+| **Web Search** | SearXNG integration for real-time information |
 | **Request Caching** | 100x+ faster responses on repeated queries |
 | **Streaming** | Real-time SSE responses |
-| **Monitoring Dashboard** | Web UI with real-time metrics |
 | **OpenAI Compatible** | Drop-in replacement for OpenAI API |
 
 ---
@@ -72,12 +75,26 @@ xdg-open http://localhost:8085/dashboard
 
 ## Models
 
+### Local Models
+
 | Model | Purpose | Size | Mode |
 |-------|---------|------|------|
 | **Phi-3 Mini** | Fast general queries | 2.4GB | CPU |
 | **Qwen2.5 7B** | Planning, research, analysis | 5.1GB | CPU |
-| **DeepSeek Coder 6.7B** | Code generation, debugging | 4.5GB | GPU |
+| **Qwen2.5-Coder 14B** | Code generation, debugging | 8.5GB | GPU |
+| **DeepSeek-Math 7B** | Math/STEM reasoning | 4.5GB | On-demand |
 | **Qwen2-VL 7B** | Vision, OCR, image analysis | 4.5GB | On-demand |
+
+### Remote Agents (A2A Protocol)
+
+| Agent | Purpose | Location |
+|-------|---------|----------|
+| **MarunochiAI** | High-quality code generation | M4 Mac (192.168.0.182) |
+| **DottscavisAI** | Creative tasks | M1 Mac (placeholder) |
+
+### Claude Integration
+
+Say "claude" in your prompt to escalate to Claude CLI for complex reasoning.
 
 Use `model: "auto"` for automatic routing based on query type.
 

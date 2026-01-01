@@ -26,7 +26,7 @@ GET /health
 ```json
 {
   "status": "ok",
-  "service": "benchai-router-v3",
+  "service": "benchai-router-v3.5",
   "features": {
     "streaming": true,
     "memory": true,
@@ -53,8 +53,9 @@ GET /v1/models
     {"id": "auto", "name": "Auto-Agent (Planner)"},
     {"id": "general", "name": "General (Phi-3 Mini)"},
     {"id": "research", "name": "Research (Qwen2.5 7B)"},
-    {"id": "code", "name": "Code (DeepSeek 6.7B)"},
-    {"id": "vision", "name": "Vision (Qwen2-VL 7B)"}
+    {"id": "code", "name": "Code (Qwen2.5-Coder 14B)"},
+    {"id": "vision", "name": "Vision (Qwen2-VL 7B)"},
+    {"id": "math", "name": "Math (DeepSeek-Math 7B)"}
   ]
 }
 ```

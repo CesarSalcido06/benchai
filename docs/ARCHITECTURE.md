@@ -1,13 +1,13 @@
 # BenchAI Architecture
 
-**Version:** 3.0
-**Last Updated:** December 2025
+**Version:** 3.5
+**Last Updated:** January 2026
 
 ---
 
 ## System Overview
 
-BenchAI is a self-hosted AI orchestration platform designed for software engineering tasks. It runs entirely on local hardware, providing privacy, customization, and zero API costs.
+BenchAI is a self-hosted AI orchestration platform designed for software engineering tasks. It features multi-agent coordination (A2A protocol), persistent learning system (Zettelkasten + experience replay), and optional Claude CLI integration. Runs entirely on local hardware, providing privacy, customization, and zero API costs.
 
 ```
                     ┌────────────────────────────────────────────────────────────┐
@@ -50,7 +50,7 @@ BenchAI is a self-hosted AI orchestration platform designed for software enginee
 │  │ Qwen2.5 7B │  │ │  Categories:  │ │  Documents:   │ │  - Git     │ │  - SearXNG  │
 │  │  :8092     │  │ │  - Facts      │ │  - Code files │ │  - Files   │ │             │
 │  ├────────────┤  │ │  - Prefs      │ │  - Docs       │ │  - Web     │ │             │
-│  │ DeepSeek   │  │ │  - Context    │ │  - Notes      │ │  - Vision  │ │             │
+│  │Qwen2.5-Cdr │  │ │  - Context    │ │  - Notes      │ │  - Vision  │ │             │
 │  │ Coder :8093│  │ │               │ │               │ │  - ...     │ │             │
 │  ├────────────┤  │ └───────────────┘ └───────────────┘ └────────────┘ └─────────────┘
 │  │ Qwen2-VL   │  │
@@ -103,16 +103,32 @@ MODELS = {
         "context": 4096,
         "threads": 12
     },
+    "planner": {
+        "file": "qwen2.5-7b-instruct.Q5_K_M.gguf",
+        "port": 8092,
+        "mode": "cpu",
+        "context": 4096
+    },
     "code": {
-        "file": "deepseek-coder-6.7b-instruct.Q5_K_M.gguf",
+        "file": "qwen2.5-coder-14b-instruct-q4_k_m.gguf",
         "port": 8093,
         "mode": "gpu",
-        "context": 8192,
-        "gpu_layers": 35
+        "context": 4096,
+        "gpu_layers": 99  # Full GPU offload
     }
-    # ... etc
+    # + vision, math models on-demand
 }
 ```
+
+### Multi-Agent (A2A Protocol)
+
+BenchAI can coordinate with remote agents:
+- **MarunochiAI** (M4 Mac): Code generation via Qwen2.5-Coder
+- **DottscavisAI** (M1 Mac): Creative tasks (placeholder)
+
+### Claude Integration
+
+Optional Claude CLI integration for complex reasoning. Triggered explicitly by including "claude" in prompt.
 
 ### 3. Agentic Planner
 
@@ -180,8 +196,8 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(
 
 ### 5. RAG Pipeline
 
-**Technology:** ChromaDB with HNSW indexing
-**Location:** `~/llm-storage/rag/chroma_db`
+**Technology:** Qdrant with HNSW indexing
+**Location:** `~/llm-storage/rag/qdrant_db`
 
 **Workflow:**
 1. **Indexing:** Code files are chunked and embedded
@@ -195,7 +211,16 @@ CREATE VIRTUAL TABLE memories_fts USING fts5(
 - Distance: Cosine similarity
 - Chunk size: 512 tokens with 50-token overlap
 
-### 6. Request Cache
+### 6. Learning System
+
+**Components:**
+- **Zettelkasten:** Knowledge graph with linked notes
+- **Experience Replay:** Task completion learning
+- **Collective Knowledge:** Cross-agent contributions
+
+**Storage:** SQLite with FTS5 for all learning data
+
+### 7. Request Cache
 
 **Purpose:** Reduce redundant LLM calls for identical requests
 
@@ -286,7 +311,7 @@ WantedBy=multi-user.target
 | 8085 | Router | Main API endpoint |
 | 8091 | Phi-3 Mini | General model |
 | 8092 | Qwen2.5 7B | Planner/Research |
-| 8093 | DeepSeek Coder | Code model |
+| 8093 | Qwen2.5-Coder 14B | Code model |
 | 8094 | Qwen2-VL | Vision model |
 
 ### Storage Layout
@@ -317,7 +342,7 @@ WantedBy=multi-user.target
 
 **12GB VRAM Budget:**
 ```
-DeepSeek Coder (GPU): ~8.5GB
+Qwen2.5-Coder 14B (GPU): ~10GB
 Remaining: ~3.5GB for KV cache and overhead
 ```
 
