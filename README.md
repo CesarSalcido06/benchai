@@ -5,7 +5,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Version](https://img.shields.io/badge/version-3.5.0-green.svg)](CHANGELOG.md)
 
-BenchAI is a local LLM router that orchestrates multiple AI models for software engineering tasks. Features multi-agent coordination (A2A protocol), persistent learning system, and optional Claude CLI integration. Run entirely on your hardware with zero API costs, full privacy, and complete customization.
+BenchAI is a local LLM router that orchestrates multiple AI models and agents for software engineering tasks. Features multi-agent coordination with MarunochiAI (A2A protocol), semantic task routing, bidirectional learning sync, and optional Claude CLI integration. Run entirely on your hardware with zero API costs, full privacy, and complete customization.
 
 ---
 
@@ -14,13 +14,14 @@ BenchAI is a local LLM router that orchestrates multiple AI models for software 
 | Feature | Description |
 |---------|-------------|
 | **Multi-Model Routing** | Automatic selection between 6 specialized local models |
-| **Multi-Agent (A2A)** | Coordinate with remote agents (MarunochiAI, DottscavisAI) |
+| **Multi-Agent (A2A)** | Semantic routing to MarunochiAI, DottscavisAI |
 | **Claude Integration** | Optional Claude CLI for complex reasoning (explicit trigger) |
 | **Agentic Planner** | Multi-step task orchestration with parallel tool execution |
 | **Learning System** | Zettelkasten knowledge graph + experience replay |
 | **88+ Tools** | Shell, Git, GitHub, Docker, file ops, web search, and more |
 | **Persistent Memory** | SQLite with FTS5 full-text search |
 | **RAG Pipeline** | Qdrant vector database for codebase indexing |
+| **Bidirectional Sync** | Experience/knowledge sharing between agents |
 | **Web Search** | SearXNG integration for real-time information |
 | **Request Caching** | 100x+ faster responses on repeated queries |
 | **Streaming** | Real-time SSE responses |
@@ -62,13 +63,72 @@ xdg-open http://localhost:8085/dashboard
 │                BenchAI Router (:8085)                    │
 │  ┌──────────┐ ┌──────────┐ ┌─────────┐ ┌─────────────┐  │
 │  │ Planner  │ │  Memory  │ │   RAG   │ │    Cache    │  │
+│  ├──────────┤ ├──────────┤ ├─────────┤ ├─────────────┤  │
+│  │ Semantic │ │  Agent   │ │  Sync   │ │  Learning   │  │
+│  │  Router  │ │  Config  │ │ Manager │ │  Pipeline   │  │
 │  └──────────┘ └──────────┘ └─────────┘ └─────────────┘  │
 └─────────────────────────────────────────────────────────┘
-         │              │           │            │
-    ┌────▼────┐    ┌────▼───┐  ┌────▼───┐   ┌────▼────┐
-    │  LLMs   │    │ SQLite │  │ChromaDB│   │  Tools  │
-    │ (4 models)│   │ +FTS5  │  │ (HNSW) │   │  (88+)  │
-    └─────────┘    └────────┘  └────────┘   └─────────┘
+    │         │              │           │            │
+┌───▼───┐ ┌───▼────┐    ┌────▼───┐  ┌────▼───┐   ┌────▼────┐
+│ LLMs  │ │Marunochi│   │ SQLite │  │ChromaDB│   │  Tools  │
+│(local)│ │   AI    │   │ +FTS5  │  │ (HNSW) │   │  (88+)  │
+└───────┘ │ (remote)│   └────────┘  └────────┘   └─────────┘
+          └─────────┘
+```
+
+---
+
+## Multi-Agent System
+
+BenchAI integrates with MarunochiAI for specialized coding tasks using semantic routing.
+
+### How It Works
+
+```
+User Query: "Write a fibonacci function"
+     ↓
+BenchAI (Semantic Router)
+     ↓ Detects: coding task
+     ↓
+MarunochiAI (192.168.0.182:8765)
+     ↓ Qwen2.5-Coder generates code
+     ↓
+Response returned via BenchAI
+```
+
+### Configuration
+
+Create/edit `configs/.env`:
+
+```bash
+# Multi-Agent Configuration
+MARUNOCHI_URL=http://192.168.0.182:8765   # MarunochiAI server address
+DOTTSCAVIS_URL=http://localhost:8766       # DottscavisAI (optional)
+
+# For local development (same machine)
+# MARUNOCHI_URL=http://localhost:8765
+```
+
+### Task Routing
+
+| Task Type | Routed To | Examples |
+|-----------|-----------|----------|
+| Coding | MarunochiAI | "write a function", "debug this code", "refactor" |
+| Research | BenchAI | "explain concept", "compare options", "best practices" |
+| Vision | DottscavisAI | "analyze image", "describe screenshot" |
+| General | BenchAI | Everything else |
+
+### Sync Endpoints
+
+```bash
+# Check agent health
+curl http://localhost:8085/v1/learning/agents/health
+
+# Manual sync with MarunochiAI
+curl -X POST http://localhost:8085/v1/learning/sync/trigger
+
+# View sync stats
+curl http://localhost:8085/v1/learning/sync/stats
 ```
 
 ---
@@ -170,9 +230,10 @@ curl http://localhost:8085/v1/metrics | jq
 | [User Guide](docs/USER-GUIDE.md) | Features and usage |
 | [API Reference](docs/API.md) | Endpoints and parameters |
 | [Architecture](docs/ARCHITECTURE.md) | System design |
+| [MarunochiAI Integration](docs/MARUNOCHIAPI_ENGINEER_GUIDE.md) | Multi-agent setup |
+| [Learning System](docs/LEARNING_SYSTEM.md) | Memory and experience sync |
 | [Performance](docs/PERFORMANCE.md) | Benchmarks and tuning |
 | [Tools Reference](docs/TOOLS.md) | All 88+ tools |
-| [Troubleshooting](docs/TROUBLESHOOTING.md) | Common issues |
 | [Research](docs/RESEARCH.md) | LLM optimization techniques |
 
 ---
