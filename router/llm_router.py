@@ -1647,17 +1647,25 @@ async def execute_claude_assist(prompt: str, context: str = "") -> str:
             full_prompt = f"Context:\n{context}\n\nTask:\n{prompt}"
 
         # Use Claude CLI in print mode (non-interactive)
+        # --no-session-persistence prevents EROFS errors when run from systemd
         cmd = [
             "claude",
             "-p", full_prompt,
-            "--output-format", "text"
+            "--output-format", "text",
+            "--no-session-persistence"
         ]
+
+        # Explicit environment to avoid systemd sandbox issues
+        env = os.environ.copy()
+        env["HOME"] = str(Path.home())
+        env["USER"] = os.environ.get("USER", "user")
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            cwd=Path.home()
+            cwd=Path.home(),
+            env=env
         )
 
         stdout, stderr = await asyncio.wait_for(
@@ -6095,6 +6103,24 @@ Provide a comprehensive, factual answer based on the search results. Include spe
             "choices": [{"index": 0, "message": {"role": "assistant", "content": ans}, "finish_reason": "stop"}]
         }
 
+    # Check for Claude escalation triggers BEFORE fast-routing
+    for trigger in CLAUDE_ESCALATION_TRIGGERS:
+        if re.search(trigger, text_query, re.IGNORECASE):
+            print(f"[CLAUDE] Escalation triggered: {trigger}")
+            claude_context = session_manager.get_context_for_planner(session_id)
+            ans = await execute_claude_assist(text_query, claude_context)
+            if "error" not in ans.lower() and "failed" not in ans.lower():
+                return {
+                    "id": f"chatcmpl-{int(time.time())}",
+                    "object": "chat.completion",
+                    "created": int(time.time()),
+                    "model": "claude-mastermind",
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": ans}, "finish_reason": "stop"}]
+                }
+            # If Claude failed, continue to normal routing
+            print(f"[CLAUDE] Failed, falling back to local models")
+            break
+
     # Simple queries (complexity < 0.4) get fast-routed without planner
     if complexity < 0.4 and intent in ["general", "code", "research"]:
         print(f"[FAST-ROUTE] Simple query (complexity={complexity:.2f}) → {intent}")
@@ -6132,8 +6158,7 @@ Provide a comprehensive, factual answer based on the search results. Include spe
     # PDF intent: Extract path and analyze
     if intent == "pdf":
         print(f"[FAST-ROUTE] PDF query detected")
-        # Extract file path from query
-        import re
+        # Extract file path from query (re is imported at top of file)
         path_match = re.search(r'[/~][\w/\-._]+\.pdf', text_query, re.IGNORECASE)
         if path_match:
             pdf_path = path_match.group(0)
