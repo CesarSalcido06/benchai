@@ -293,20 +293,12 @@ MODELS = {
     }
 }
 
-# Claude is the "mastermind" - escalate to it for:
+# Claude is the "mastermind" - ONLY escalate when user explicitly asks for Claude
 CLAUDE_ESCALATION_TRIGGERS = [
-    "complex architecture",
-    "code review",
-    "best practice",
-    "design pattern",
-    r"explain.*(concept|what is|how does|to me|like i)",  # Explain concepts
-    "why.*not working",
-    "debug.*issue",
-    "help.*understand",
-    "teach.*how",
-    "compare.*approaches",
-    r"what is.*(recursion|polymorphism|inheritance|closure|callback|async|await|promise)",  # Programming concepts
-    r"how (do|does|can|should|would)"  # Explanation requests
+    r"\bclaude\b",  # User explicitly mentions "claude"
+    r"ask claude",
+    r"use claude",
+    r"claude.*(help|assist|review|explain)",
 ]
 
 IDLE_TIMEOUT = 600  # 10 minutes
