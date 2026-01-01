@@ -350,13 +350,19 @@ async def handle_agent_task(payload: Dict) -> Dict:
     task_type = payload.get("task_type", "")
     description = payload.get("description", "")
 
-    # Route to appropriate agent
-    endpoints = {
-        "marunochiAI": "http://localhost:8765/v1/a2a/task",
-        "dottscavisAI": "http://dottscavisai.local:8766/v1/a2a/task"
-    }
+    # Route to appropriate agent using configured URLs
+    from learning.agent_config import get_config
+    config = get_config()
 
-    endpoint = endpoints.get(target_agent)
+    endpoint = None
+    if target_agent in config:
+        endpoint = config[target_agent].get_url("a2a_task")
+    else:
+        # Fallback for unknown agents
+        legacy_endpoints = {
+            "dottscavisAI": "http://dottscavisai.local:8766/v1/a2a/task"
+        }
+        endpoint = legacy_endpoints.get(target_agent)
     if not endpoint:
         return {"error": f"Unknown agent: {target_agent}"}
 
