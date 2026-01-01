@@ -87,6 +87,14 @@ def load_env():
 
 load_env()
 
+# Refresh agent config after .env is loaded (fixes import order issue)
+try:
+    from learning.agent_config import refresh_config
+    refresh_config()
+    print(f"[AGENTS] Config refreshed from .env")
+except ImportError:
+    pass
+
 # Obsidian REST API Configuration
 OBSIDIAN_API_KEY = os.environ.get("OBSIDIAN_API_KEY", "")
 OBSIDIAN_API_URL = os.environ.get("OBSIDIAN_API_URL", "https://localhost:27124")
@@ -2110,19 +2118,22 @@ async def execute_agent_code(task: str, language: str = "python") -> str:
     enhanced_context = "\n\n".join(context_parts) if context_parts else ""
 
     # Try MarunochiAI first
-    from router.learning.semantic_router import check_marunochi_health
+    from learning.semantic_router import check_marunochi_health
+    from learning.agent_config import get_config
 
     marunochi_available = await check_marunochi_health()
 
     if marunochi_available:
         print("[AGENT:CODE] MarunochiAI available - routing to M4 Mac")
         try:
+            config = get_config()
+            marunochi_url = config["marunochiAI"].get_url("chat")
             async with httpx.AsyncClient(timeout=120.0) as client:
                 # Include BenchAI context in the request
                 enhanced_task = f"{task}\n\n**Context from BenchAI:**\n{enhanced_context}" if enhanced_context else task
 
                 resp = await client.post(
-                    "http://localhost:8765/v1/chat/completions",
+                    marunochi_url,
                     json={
                         "messages": [
                             {"role": "system", "content": f"You are an expert {language} programmer. Write clean, efficient, well-documented code."},
@@ -2162,6 +2173,49 @@ async def execute_agent_code(task: str, language: str = "python") -> str:
     result = await execute_code_task(full_task, language)
 
     return f"**Generated locally (MarunochiAI offline):**\n\n{result}"
+
+
+async def route_code_to_marunochi(messages: List[Dict], stream: bool = False) -> tuple:
+    """
+    Route coding requests to MarunochiAI if available, otherwise use local model.
+
+    Returns: (response_content, model_name, used_marunochi)
+    """
+    from learning.semantic_router import check_marunochi_health
+    from learning.agent_config import get_config
+
+    marunochi_available = await check_marunochi_health()
+
+    if marunochi_available:
+        print("[ROUTE:CODE] MarunochiAI available - routing to M4 Mac")
+        try:
+            config = get_config()
+            marunochi_url = config["marunochiAI"].get_url("chat")
+
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                resp = await client.post(
+                    marunochi_url,
+                    json={
+                        "messages": messages,
+                        "max_tokens": 2048,
+                        "temperature": 0.3,
+                        "stream": False  # MarunochiAI handles streaming differently
+                    }
+                )
+
+                if resp.status_code == 200:
+                    result = resp.json()
+                    content = result.get("choices", [{}])[0].get("message", {}).get("content", "")
+                    model = result.get("model", "marunochiAI")
+                    return (content, f"marunochiAI-{model}", True)
+
+        except Exception as e:
+            print(f"[ROUTE:CODE] MarunochiAI call failed: {e}, falling back to local")
+
+    # Fallback to local code model
+    print("[ROUTE:CODE] Using local code model")
+    content = await execute_reasoning(messages, "code")
+    return (content, "auto-code", False)
 
 
 async def execute_deep_research(query: str) -> str:
@@ -6045,7 +6099,20 @@ Provide a comprehensive, factual answer based on the search results. Include spe
     # Simple queries (complexity < 0.4) get fast-routed without planner
     if complexity < 0.4 and intent in ["general", "code", "research"]:
         print(f"[FAST-ROUTE] Simple query (complexity={complexity:.2f}) → {intent}")
-        target_model = "code" if intent == "code" else "general"
+
+        # Route coding tasks to MarunochiAI if available
+        if intent == "code":
+            ans, model_name, used_marunochi = await route_code_to_marunochi(messages_dicts)
+            return {
+                "id": f"chatcmpl-{int(time.time())}",
+                "object": "chat.completion",
+                "created": int(time.time()),
+                "model": model_name,
+                "choices": [{"index": 0, "message": {"role": "assistant", "content": ans}, "finish_reason": "stop"}]
+            }
+
+        # Non-coding queries use local models
+        target_model = "general"
 
         if request.stream:
             async def fast_stream():
@@ -6871,24 +6938,23 @@ Provide a comprehensive, factual answer based on the search results. Include spe
 
             elif tool == "reasoning":
                 intent = detect_intent(str(args), has_image)
-                # Route based on intent: code → code model, complex → planner, else → research
-                if intent == "code":
-                    target_model = "code"
-                elif intent == "planner":
-                    target_model = "planner"
-                else:
-                    target_model = "research"
-                print(f"[TOOL:REASONING] Intent: {intent} → Model: {target_model}")
+                print(f"[TOOL:REASONING] Intent: {intent}")
 
                 msgs = [
                     {"role": "system", "content": "You are BenchAI, an expert engineering assistant. Be helpful, accurate, and concise."},
                     {"role": "user", "content": prompt_with_context}
                 ]
 
-                if request.stream:
-                    # For streaming, we need to handle this differently
-                    res = await execute_reasoning(msgs, target_model)
+                # Route code to MarunochiAI if available
+                if intent == "code":
+                    res, model_name, _ = await route_code_to_marunochi(msgs)
+                    print(f"[TOOL:REASONING] Routed to: {model_name}")
                 else:
+                    # Route based on intent: complex → planner, else → research
+                    if intent == "planner":
+                        target_model = "planner"
+                    else:
+                        target_model = "research"
                     res = await execute_reasoning(msgs, target_model)
 
                 final_response += res
