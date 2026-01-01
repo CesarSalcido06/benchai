@@ -19,6 +19,9 @@ from .interaction_logger import InteractionLogger
 from .learning_pipeline import LearningPipeline
 from .zettelkasten import ZettelkastenKnowledgeGraph, Zettel, ZettelType, LinkType
 from .research_api import ResearchAPI, ResearchQuery, QueryPriority, QueryStatus
+from .agent_config import get_config, get_marunochi_url, get_dottscavis_url, refresh_config
+from .semantic_router import SemanticTaskRouter, route_task, classify_domain
+from .agent_sync import AgentSyncManager
 
 __all__ = [
     # Memory
@@ -42,4 +45,15 @@ __all__ = [
     'ResearchQuery',
     'QueryPriority',
     'QueryStatus',
+    # Agent Configuration
+    'get_config',
+    'get_marunochi_url',
+    'get_dottscavis_url',
+    'refresh_config',
+    # Routing
+    'SemanticTaskRouter',
+    'route_task',
+    'classify_domain',
+    # Sync
+    'AgentSyncManager',
 ]

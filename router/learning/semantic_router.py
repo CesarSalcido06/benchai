@@ -14,6 +14,8 @@ from typing import Dict, List, Optional, Tuple, Any
 from dataclasses import dataclass
 from enum import Enum
 
+from .agent_config import get_config, get_marunochi_url
+
 
 async def call_marunochi_search(query: str, limit: int = 10) -> Optional[Dict[str, Any]]:
     """
@@ -27,9 +29,11 @@ async def call_marunochi_search(query: str, limit: int = 10) -> Optional[Dict[st
         Search results or None if unavailable
     """
     try:
+        config = get_config()
+        url = config["marunochiAI"].get_url("search")
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "http://localhost:8765/v1/codebase/search",
+                url,
                 json={"query": query, "limit": limit},
                 timeout=aiohttp.ClientTimeout(total=5)
             ) as resp:
@@ -43,9 +47,11 @@ async def call_marunochi_search(query: str, limit: int = 10) -> Optional[Dict[st
 async def check_marunochi_health() -> bool:
     """Check if MarunochiAI is available."""
     try:
+        config = get_config()
+        url = config["marunochiAI"].get_url("health")
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                "http://localhost:8765/health",
+                url,
                 timeout=aiohttp.ClientTimeout(total=2)
             ) as resp:
                 if resp.status == 200:
@@ -230,12 +236,8 @@ AGENT_CAPABILITIES = {
             "search code", "find function", "where is", "code for",
             "index codebase", "search codebase", "find class", "find method"
         ],
-        "endpoints": {
-            "chat": "http://localhost:8765/v1/chat/completions",
-            "search": "http://localhost:8765/v1/codebase/search",
-            "index": "http://localhost:8765/v1/codebase/index",
-            "stats": "http://localhost:8765/v1/codebase/stats"
-        },
+        # Endpoints are now configured via MARUNOCHI_URL environment variable
+        # Use get_config()["marunochiAI"].get_url("endpoint_name") to get URLs
         "always_available": False,
         "priority": 0.95  # Very high for coding tasks
     },

@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 import json
 
+from .agent_config import get_config, AgentEndpoints
+
 
 @dataclass
 class SyncResult:
@@ -42,25 +44,11 @@ class AgentSyncManager:
     - Knowledge sync (Zettelkasten notes)
     - Capability updates
     - Health-aware sync (only sync with healthy agents)
-    """
 
-    # Agent endpoint configurations
-    AGENT_ENDPOINTS = {
-        "marunochiAI": {
-            "base_url": "http://localhost:8765",
-            "health": "/health",
-            "sync_push": "/v1/sync/receive",  # Endpoint to receive sync data
-            "sync_pull": "/v1/sync/share",    # Endpoint to share data
-            "capabilities": "/v1/capabilities"
-        },
-        "dottscavisAI": {
-            "base_url": "http://localhost:8766",
-            "health": "/health",
-            "sync_push": "/v1/sync/receive",
-            "sync_pull": "/v1/sync/share",
-            "capabilities": "/v1/capabilities"
-        }
-    }
+    Agent endpoints are configured via environment variables:
+    - MARUNOCHI_URL: MarunochiAI base URL (default: http://localhost:8765)
+    - DOTTSCAVIS_URL: DottscavisAI base URL (default: http://localhost:8766)
+    """
 
     def __init__(self, local_memory, local_zettelkasten):
         """
@@ -74,15 +62,19 @@ class AgentSyncManager:
         self.zettelkasten = local_zettelkasten
         self.sync_history: List[SyncResult] = []
 
+    def _get_agent_endpoints(self) -> Dict[str, AgentEndpoints]:
+        """Get agent endpoints from configuration."""
+        return get_config()
+
     async def check_agent_health(self, agent_id: str) -> bool:
         """Check if an agent is available for sync."""
-        config = self.AGENT_ENDPOINTS.get(agent_id)
+        config = self._get_agent_endpoints().get(agent_id)
         if not config:
             return False
 
         try:
             async with aiohttp.ClientSession() as session:
-                url = f"{config['base_url']}{config['health']}"
+                url = config.get_url("health")
                 async with session.get(url, timeout=aiohttp.ClientTimeout(total=3)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
@@ -108,7 +100,7 @@ class AgentSyncManager:
         Returns:
             SyncResult with operation details
         """
-        config = self.AGENT_ENDPOINTS.get(agent_id)
+        config = self._get_agent_endpoints().get(agent_id)
         if not config:
             return SyncResult(
                 agent_id=agent_id,
@@ -132,7 +124,7 @@ class AgentSyncManager:
 
         try:
             async with aiohttp.ClientSession() as session:
-                url = f"{config['base_url']}{config['sync_push']}"
+                url = config.get_url("sync_push")
                 payload = {
                     "from_agent": "benchai",
                     "sync_type": sync_type,
@@ -196,7 +188,7 @@ class AgentSyncManager:
         Returns:
             SyncResult with operation details
         """
-        config = self.AGENT_ENDPOINTS.get(agent_id)
+        config = self._get_agent_endpoints().get(agent_id)
         if not config:
             return SyncResult(
                 agent_id=agent_id,
@@ -219,7 +211,7 @@ class AgentSyncManager:
 
         try:
             async with aiohttp.ClientSession() as session:
-                url = f"{config['base_url']}{config['sync_pull']}"
+                url = config.get_url("sync_pull")
                 params = {
                     "requester": "benchai",
                     "sync_type": sync_type,
@@ -395,7 +387,7 @@ class AgentSyncManager:
         """Sync with all known agents."""
         all_results = {}
 
-        for agent_id in self.AGENT_ENDPOINTS.keys():
+        for agent_id in self._get_agent_endpoints().keys():
             if await self.check_agent_health(agent_id):
                 results = await self.bidirectional_sync(agent_id)
                 all_results[agent_id] = results
