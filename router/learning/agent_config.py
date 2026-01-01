@@ -14,14 +14,21 @@ from dataclasses import dataclass
 class AgentEndpoints:
     """Endpoint configuration for an agent."""
     base_url: str
+    # Common endpoints
     health: str = "/health"
     sync_push: str = "/v1/sync/receive"
     sync_pull: str = "/v1/sync/share"
     capabilities: str = "/v1/capabilities"
     chat: str = "/v1/chat/completions"
+    # MarunochiAI specific
     search: str = "/v1/codebase/search"
     index: str = "/v1/codebase/index"
     stats: str = "/v1/codebase/stats"
+    # DottscavisAI specific
+    vision: str = "/v1/vision/analyze"
+    image_gen: str = "/v1/images/generate"
+    tts: str = "/v1/audio/speech"
+    a2a_task: str = "/v1/a2a/task"
 
     def get_url(self, endpoint: str) -> str:
         """Get full URL for an endpoint."""

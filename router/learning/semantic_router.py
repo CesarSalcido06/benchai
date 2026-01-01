@@ -65,9 +65,11 @@ async def check_marunochi_health() -> bool:
 async def check_dottscavis_health() -> bool:
     """Check if DottscavisAI is available."""
     try:
+        config = get_config()
+        url = config["dottscavisAI"].get_url("health")
         async with aiohttp.ClientSession() as session:
             async with session.get(
-                "http://dottscavisai.local:8766/health",
+                url,
                 timeout=aiohttp.ClientTimeout(total=2)
             ) as resp:
                 if resp.status == 200:
@@ -91,9 +93,11 @@ async def call_dottscavis_task(task_type: str, description: str, context: Dict =
         Task result or None if unavailable
     """
     try:
+        config = get_config()
+        url = config["dottscavisAI"].get_url("a2a_task")
         async with aiohttp.ClientSession() as session:
             async with session.post(
-                "http://dottscavisai.local:8766/v1/a2a/task",
+                url,
                 json={
                     "from_agent": "benchai",
                     "task_type": task_type,
@@ -254,13 +258,8 @@ AGENT_CAPABILITIES = {
             "create video", "3d model", "animation", "visual", "audio",
             "transcribe", "ocr", "extract text from image"
         ],
-        "endpoints": {
-            "chat": "http://dottscavisai.local:8766/v1/chat/completions",
-            "vision": "http://dottscavisai.local:8766/v1/vision/analyze",
-            "image_gen": "http://dottscavisai.local:8766/v1/images/generate",
-            "tts": "http://dottscavisai.local:8766/v1/audio/speech",
-            "a2a_task": "http://dottscavisai.local:8766/v1/a2a/task"
-        },
+        # Endpoints are now configured via DOTTSCAVIS_URL environment variable
+        # Use get_config()["dottscavisAI"].get_url("endpoint_name") to get URLs
         "always_available": False,
         "priority": 0.95  # Very high for creative tasks
     }
