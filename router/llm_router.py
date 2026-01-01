@@ -2124,10 +2124,9 @@ async def execute_agent_code(task: str, language: str = "python") -> str:
     marunochi_available = await check_marunochi_health()
 
     if marunochi_available:
-        print("[AGENT:CODE] MarunochiAI available - routing to M4 Mac")
+        marunochi_url = get_config()["marunochiAI"].get_url("chat")
+        print(f"[AGENT:CODE] MarunochiAI available - routing to {marunochi_url}")
         try:
-            config = get_config()
-            marunochi_url = config["marunochiAI"].get_url("chat")
             async with httpx.AsyncClient(timeout=120.0) as client:
                 # Include BenchAI context in the request
                 enhanced_task = f"{task}\n\n**Context from BenchAI:**\n{enhanced_context}" if enhanced_context else task
