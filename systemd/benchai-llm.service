@@ -1,14 +1,12 @@
 [Unit]
 Description=BenchAI LLM Servers (Optimized Stack)
-After=network.target docker.service
-Wants=docker.service
+After=network.target
 
 [Service]
 Type=forking
-User=user
 WorkingDirectory=/home/user/benchai
 Environment="PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin"
-ExecStartPre=/bin/bash -c 'pkill -9 -f llama-server || true'
+ExecStartPre=/bin/bash -c 'pkill -9 -f "[l]lama-server" || true'
 ExecStartPre=/bin/sleep 2
 
 # Start Qwen2.5-Coder-14B on GPU (port 8093)
@@ -33,10 +31,10 @@ ExecStartPost=/bin/bash -c 'sleep 8 && /home/user/llama.cpp/build/bin/llama-serv
     -ngl 0 -c 4096 -t 6 -b 512 --mlock \
     --log-disable &'
 
-ExecStop=/bin/bash -c 'pkill -9 -f llama-server || true'
+ExecStop=/bin/bash -c 'pkill -9 -f "[l]lama-server" || true'
 RemainAfterExit=yes
 Restart=on-failure
 RestartSec=10
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target

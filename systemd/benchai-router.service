@@ -1,12 +1,10 @@
 [Unit]
 Description=BenchAI Router (Multi-Agent Orchestrator)
-After=network.target benchai-llm.service docker.service
+After=network.target benchai-llm.service
 Wants=benchai-llm.service
-Requires=docker.service
 
 [Service]
 Type=simple
-User=user
 WorkingDirectory=/home/user/benchai/router
 Environment="PATH=/home/user/.local/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="PYTHONUNBUFFERED=1"
@@ -17,4 +15,4 @@ Restart=always
 RestartSec=10
 
 [Install]
-WantedBy=multi-user.target
+WantedBy=default.target
